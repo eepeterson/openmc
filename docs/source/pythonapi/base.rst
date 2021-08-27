@@ -138,6 +138,8 @@ Constructing Tallies
    openmc.ParticleFilter
    openmc.RegularMesh
    openmc.RectilinearMesh
+   openmc.CylindricalMesh
+   openmc.SphericalMesh
    openmc.UnstructuredMesh
    openmc.Trigger
    openmc.TallyDerivative
