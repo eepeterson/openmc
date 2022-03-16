@@ -131,10 +131,16 @@ class RegularMesh(MeshBase):
 
     Parameters
     ----------
-    mesh_id : int
-        Unique identifier for the mesh
-    name : str
-        Name of the mesh
+    dimension : Iterable of int
+        The number of mesh cells in each direction.
+    lower_left : Iterable of float
+        The lower-left corner of the structured mesh. If only two coordinate
+        are given, it is assumed that the mesh is an x-y mesh.
+    upper_right : Iterable of float
+        The upper-right corner of the structured mesh. If only two coordinate
+        are given, it is assumed that the mesh is an x-y mesh.
+    width : Iterable of float
+        The width of mesh cells in each direction.
 
     Attributes
     ----------
@@ -160,13 +166,14 @@ class RegularMesh(MeshBase):
 
     """
 
-    def __init__(self, mesh_id=None, name=''):
-        super().__init__(mesh_id, name)
+    def __init__(self, dimension=None, lower_left=None, upper_right=None,
+                 width=None, **kwargs):
+        super().__init__(**kwargs)
 
-        self._dimension = None
-        self._lower_left = None
-        self._upper_right = None
-        self._width = None
+        self.dimension = dimension
+        self.lower_left = lower_left
+        self.upper_right = upper_right
+        self.width = width
 
     @property
     def dimension(self):
@@ -243,6 +250,10 @@ class RegularMesh(MeshBase):
         else:
             nx, = self.dimension
             return ((x,) for x in range(1, nx + 1))
+
+    @property
+    def centroids(self):
+        return 
 
     @dimension.setter
     def dimension(self, dimension):
@@ -569,12 +580,12 @@ class RectilinearMesh(MeshBase):
 
     """
 
-    def __init__(self, mesh_id=None, name=''):
-        super().__init__(mesh_id, name)
+    def __init__(self, x_grid=None, y_grid=None, z_grid=None, **kwargs):
+        super().__init__(**kwargs)
 
-        self._x_grid = None
-        self._y_grid = None
-        self._z_grid = None
+        self.x_grid = x_grid
+        self.y_grid = y_grid
+        self.z_grid = z_grid
 
     @property
     def dimension(self):
@@ -628,6 +639,13 @@ class RectilinearMesh(MeshBase):
                 for z in range(1, nz + 1)
                 for y in range(1, ny + 1)
                 for x in range(1, nx + 1))
+
+    @property
+    def centroids(self):
+        xc = (self.x_grid[:-1] + self.x_grid[1:]) / 2
+        yc = (self.y_grid[:-1] + self.y_grid[1:]) / 2
+        zc = (self.z_grid[:-1] + self.z_grid[1:]) / 2
+        return np.meshgrid(xc, yc, zc, indexing='ij')
 
     @x_grid.setter
     def x_grid(self, grid):
@@ -760,8 +778,8 @@ class CylindricalMesh(MeshBase):
 
     """
 
-    def __init__(self, mesh_id=None, name=''):
-        super().__init__(mesh_id, name)
+    def __init__(self, r_grid=None, phi_grid=None, z_grid=None, **kwargs):
+        super().__init__(**kwargs)
 
         self._r_grid = None
         self._phi_grid = [0.0, 2*pi]
@@ -798,6 +816,13 @@ class CylindricalMesh(MeshBase):
                 for z in range(1, nz + 1)
                 for p in range(1, np + 1)
                 for r in range(1, nr + 1))
+
+    @property
+    def centroids(self):
+        rc = (self.r_grid[:-1] + self.x_grid[1:]) / 2
+        phic = (self.phi_grid[:-1] + self.phi_grid[1:]) / 2
+        zc = (self.z_grid[:-1] + self.z_grid[1:]) / 2
+        return np.meshgrid(rc, phic, zc, indexing='ij')
 
     @r_grid.setter
     def r_grid(self, grid):
@@ -918,6 +943,15 @@ class SphericalMesh(MeshBase):
 
     Parameters
     ----------
+    r_grid : numpy.ndarray
+        1-D array of mesh boundary points along the r-axis.
+        Requirement is r >= 0.
+    theta_grid : numpy.ndarray
+        1-D array of mesh boundary points along the theta-axis in radians.
+        The default value is [0, π], i.e. the full theta range.
+    phi_grid : numpy.ndarray
+        1-D array of mesh boundary points along the phi-axis in radians.
+        The default value is [0, 2π], i.e. the full phi range.
     mesh_id : int
         Unique identifier for the mesh
     name : str
@@ -948,12 +982,12 @@ class SphericalMesh(MeshBase):
 
     """
 
-    def __init__(self, mesh_id=None, name=''):
-        super().__init__(mesh_id, name)
+    def __init__(self, r_grid=None, theta_grid=None, phi_grid=None, **kwargs):
+        super().__init__(**kwargs)
 
-        self._r_grid = None
-        self._theta_grid = [0, pi]
-        self._phi_grid = [0, 2*pi]
+        self._r_grid = r_grid
+        self._theta_grid = [0, pi] if theta_grid is None else theta_grid
+        self._phi_grid = [0, 2*pi] if phi_grid is None else phi_grid
 
     @property
     def dimension(self):
@@ -986,6 +1020,13 @@ class SphericalMesh(MeshBase):
                 for p in range(1, np + 1)
                 for t in range(1, nt + 1)
                 for r in range(1, nr + 1))
+
+    @property
+    def centroids(self):
+        rc = (self.r_grid[:-1] + self.x_grid[1:]) / 2
+        thetac = (self.theta_grid[:-1] + self.theta_grid[1:]) / 2
+        phic = (self.phi_grid[:-1] + self.phi_grid[1:]) / 2
+        return np.meshgrid(rc, thetac, phic, indexing='ij')
 
     @r_grid.setter
     def r_grid(self, grid):
