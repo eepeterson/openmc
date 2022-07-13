@@ -538,7 +538,7 @@ class Material(IDManagerMixin):
 
         """
 
-        cv.check_type('nuclide', element, str)
+        cv.check_type('element', element, str)
         cv.check_type('percent', percent, Real)
         cv.check_value('percent type', percent_type, {'ao', 'wo'})
 
@@ -1162,6 +1162,12 @@ class Material(IDManagerMixin):
 
         return new_mat
 
+    def _to_library_entry(self):
+        lib_entry = {'name':self.name,
+                     }
+
+        return lib_entry
+
     @classmethod
     def from_library(cls, name, library='pnnl_v2'):
         """Adds a material composition from a predefined library
@@ -1418,3 +1424,110 @@ class Materials(cv.CheckedList):
             materials.cross_sections = xs.text
 
         return materials
+
+
+def generate_material_library_entry(material, name=None, reference=None):
+    if isinstance(material, Material):
+        tmp_mat = {nuc: {'percent'=p,'percent_type':p_type}
+                   for (nuc, p, p_type) in mat.get_nuclide_densities()}
+
+        if not mat.name:
+            raise(ValueError, 'Material library entries must have a name')
+        if mat.density is None:
+            raise(ValueError, 'Material library entries must have a density')
+
+        self._materials[mat.name] = tmp_mat
+    elif isinstance(material, dict):
+        name = mat.pop('name')
+        density = mat.pop('density')
+        density_units = mat.pop('density_units')
+        for nuc_or_elem, kwargs in mat.items():
+            percent = kwargs.pop('percent')
+            if nuc_or_elem is in nucs:
+    else:
+        raise(ValueError, 'material must be an instance of openmc.Material or dict')
+
+
+class _MaterialSpecification:
+    def __init__(self, name, nuclides=None, elements=None, density,
+                 density_units, reference=""):
+
+class MaterialLibrary:
+    """A material library composed of a collection of material specifications.
+
+    To create a material, one should create an instance of this class, add
+    nuclides or elements with :meth:`Material.add_nuclide` or
+    :meth:`Material.add_element`, respectively, and set the total material
+    density with :meth:`Material.set_density()`. The material can then be
+    assigned to a cell using the :attr:`Cell.fill` attribute.
+
+    Parameters
+    ----------
+    material_id : int, optional
+        Unique identifier for the material. If not specified, an identifier will
+        automatically be assigned.
+    name : str, optional
+        Name of the material. If not specified, the name will be the empty
+        string.
+    temperature : float, optional
+        Temperature of the material in Kelvin. If not specified, the material
+        inherits the default temperature applied to the model.
+
+    Attributes
+    ----------
+    name : str
+        Unique identifier for the material library
+    materials : dict or iterable of openmc.Material
+        Collection of material specifications
+    reference : str, optional
+        A reference or citation for the library
+
+    """
+
+    def __init__(self, library_name, materials, filename, reference):
+        # Initialize class attributes
+        self.library_name = library_name
+        self.materials = materials
+
+    def __repr__(self):
+        pass
+
+    def __str__(self):
+        pass
+
+    @property
+    def materials(self):
+        return self._materials
+
+    @materials.setter
+    def materials(self, materials):
+        # must be iterable of materials or equivalent info (i.e. dict)
+        #
+        for mat in materials:
+
+    def export_to_json(self, path: Union[str, os.PathLike] = 'library.json'):
+        """Export material collection to a JSON file.
+
+        Parameters
+        ----------
+        path : str
+            Path to file to write. Defaults to 'materials.xml'.
+
+        """
+        # Check if path is a directory
+        p = Path(path)
+        if p.is_dir():
+            p /= 'materials.xml'
+
+        # Write materials to the file one-at-a-time.  This significantly reduces
+        # memory demand over allocating a complete ElementTree and writing it in
+        # one go.
+        with open(str(p), 'w', encoding='utf-8',
+                  errors='xmlcharrefreplace') as fh:
+
+            # Write the header and the opening tag for the root element.
+            fh.write("<?xml version='1.0' encoding='utf-8'?>\n")
+            fh.write('<materials>\n')
+
+
+
