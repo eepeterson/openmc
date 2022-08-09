@@ -774,12 +774,21 @@ class RectilinearMesh(StructuredMesh):
 
     """
 
-    def __init__(self, mesh_id=None, name=''):
+    def __init__(self, mesh_id=None, name='', x_grid=None, y_grid=None,
+                 z_grid=None):
         super().__init__(mesh_id, name)
 
         self._x_grid = None
+        if x_grid is not None:
+            self.x_grid = x_grid
+
         self._y_grid = None
+        if y_grid is not None:
+            self.y_grid = y_grid
+
         self._z_grid = None
+        if z_grid is not None:
+            self.z_grid = z_grid
 
     @property
     def dimension(self):
@@ -999,12 +1008,21 @@ class CylindricalMesh(StructuredMesh):
 
     """
 
-    def __init__(self, mesh_id=None, name=''):
+    def __init__(self, mesh_id=None, name='', r_grid=None, phi_grid=None,
+                 z_grid=None):
         super().__init__(mesh_id, name)
 
         self._r_grid = None
-        self._phi_grid = [0.0, 2*pi]
+        if r_grid is not None:
+            self.r_grid = r_grid
+
+        self.phi_grid = [0.0, 2*pi]
+        if phi_grid is not None:
+            self.phi_grid = phi_grid
+
         self._z_grid = None
+        if z_grid is not None:
+            self.z_grid = z_grid
 
     @property
     def dimension(self):
@@ -1231,12 +1249,21 @@ class SphericalMesh(StructuredMesh):
 
     """
 
-    def __init__(self, mesh_id=None, name=''):
+    def __init__(self, mesh_id=None, name='', r_grid=None, theta_grid=None,
+                 phi_grid=None):
         super().__init__(mesh_id, name)
 
         self._r_grid = None
-        self._theta_grid = [0, pi]
-        self._phi_grid = [0, 2*pi]
+        if r_grid is not None:
+            self.r_grid = r_grid
+
+        self.theta_grid = [0, pi]
+        if theta_grid is not None:
+            self.theta_grid = theta_grid
+
+        self.phi_grid = [0, 2*pi]
+        if phi_grid is not None:
+            self.phi_grid = phi_grid
 
     @property
     def dimension(self):
