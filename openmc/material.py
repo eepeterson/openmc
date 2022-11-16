@@ -1,5 +1,5 @@
 from collections import OrderedDict, defaultdict, namedtuple, Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableMapping
 from copy import deepcopy
 from numbers import Real
 from pathlib import Path
@@ -27,6 +27,100 @@ DENSITY_UNITS = ('g/cm3', 'g/cc', 'kg/m3', 'atom/b-cm', 'atom/cm3', 'sum',
 
 
 NuclideTuple = namedtuple('NuclideTuple', ['name', 'percent', 'percent_type'])
+
+
+class Composition(IDManagerMixin, MutableMapping):
+    """A material composition describing a collection of nuclides/elements.
+
+    Parameters
+    ----------
+    data : dict, optional
+        Dictionary of the compositions whose keys are nuclide or element
+        strings and values are fractions of the composition or the string
+        "balance".
+    composition_id : int, optional
+        Unique identifier for the composition. If not specified, an identifier
+        will automatically be assigned.
+    name : str, optional
+        Name of the material. If not specified, the name will be the empty
+        string.
+
+    Attributes
+    ----------
+    id : int
+        Unique identifier for the material
+
+        .. versionadded:: 0.13.3
+
+    """
+    next_id = 1
+    used_ids = set()
+
+    def __init__(self, data=(), composition_id=None, name='', percent_type='ao'):
+        # Initialize class attributes
+        self.id = composition_id
+        self.name = name
+        self.percent_type = percent_type
+        self._mapping = {}
+        self.update(data)
+
+    def __getitem__(self, key):
+        return self._mapping[key]
+
+    def __delitem__(self, key):
+        del self._mapping[key]
+
+    def __setitem__(self, key, value):
+        if not key in NUCLIDES or key in ELEMENTS:
+            raise KeyError(f'Unrecognized nuclide or element: {key}. '
+                           'Acceptable nuclides or elements are '
+                           '{NUCLIDES} and {ELEMENTS}')
+        self._mapping[key] = value
+
+    def __iter__(self):
+        return iter(self._mapping)
+
+    def __len__(self):
+        return len(self._mapping)
+
+    def __repr__(self):
+        string = 'Composition\n'
+        string += '{: <16}=\t{}\n'.format('\tID', self._id)
+        string += '{: <16}=\t{}\n'.format('\tName', self._name)
+
+        string += '{: <16}\n'.format('\tNuclides')
+        string += repr(self._mapping)
+
+        return string
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def nuclides(self):
+        return self._nuclides
+
+    @property
+    def elements(self):
+        return self._elements
+
+    @property
+    def is_normalized(self):
+        return math.isclose(sum(self._mapping.values()), 1.0)
+
+    @name.setter
+    def name(self, name: Optional[str]):
+        if name is not None:
+            cv.check_type(f'name for Composition ID="{self._id}"',
+                          name, str)
+            self._name = name
+        else:
+            self._name = ''
+
+    def library_diff(lib1, lib2=None):
+        """Show the composition differences between two libraries"""
+        pass
 
 
 class Material(IDManagerMixin):
