@@ -26,28 +26,35 @@ from openmc.stats import Univariate
 DENSITY_UNITS = ('g/cm3', 'g/cc', 'kg/m3', 'atom/b-cm', 'atom/cm3', 'sum',
                  'macro')
 
-_MAT_LIB_DIRS = [openmc.data.INTERNAL_DATA_PATH / 'material_libraries']
-if os.environ.get('OPENMC_MATERIAL_LIBRARY_PATH') is not None:
-    _MAT_LIB_DIRS += [Path(a) for a in os.environ.get('OPENMC_MATERIAL_LIBRARY_PATH').split(':')]
 
-_MAT_LIB_PATHS = [f.resolve() for p in _MAT_LIB_DIRS
-                  for f in sorted(Path(p).glob('*.xml'))]
-
-# MATERIAL_LIBRARIES maps strings of library names to pathlib.Path objects for 
-# each available material library
+# MATERIAL_LIBRARIES maps pathlib.Path objects for a material.xml style file to
+# the list of material names available in that library.
 MATERIAL_LIBRARIES = {}
-# _MATERIAL_LIBRARY_CACHE maps strings of library names to the loaded library to
-# prevent loading the same library multiple times or loading unused libraries
-_MATERIAL_LIBRARY_CACHE = {}
 
-for matlib_path in _MAT_LIB_PATHS:
-    if matlib_path.stem not in MATERIAL_LIBRARIES.keys():
-        MATERIAL_LIBRARIES[matlib_path.stem] = matlib_path
-    else:
-        msg = (f"Material library {matlib_path} is superseded by "
-               "{MATERIAL_LIBRARIES[matlib_path.stem]} and will not be "
-               "available.")
-        warnings.warn(msg)
+def _find_all_materials(path):
+        tree = ET.parse(path)
+        root = tree.getroot()
+        names = [elem.get('name') for elem in root.findall('material')]
+        if not names:
+            raise ValueError('No valid material definitions were found')
+        return names
+
+def _get_material_libraries():
+    matlibs = {}
+
+    matlib_dirs = [openmc.data.INTERNAL_DATA_PATH / 'material_libraries']
+    if os.environ.get('OPENMC_MATERIAL_LIBRARY_PATH') is not None:
+        matlib_dirs += [Path(a) for a in os.environ.get('OPENMC_MATERIAL_LIBRARY_PATH').split(':')]
+
+    matlib_paths = [f.resolve() for p in matlib_dirs for f in sorted(Path(p).glob('*.xml'))]
+
+    # For all the material library xml files find all the material names 
+    for path in matlib_paths:
+        matlibs[path] = _find_all_materials(path)
+
+    return matlibs
+
+MATERIAL_LIBRARIES = _get_material_libraries()
 
 
 NuclideTuple = namedtuple('NuclideTuple', ['name', 'percent', 'percent_type'])
@@ -128,6 +135,7 @@ class Material(IDManagerMixin):
 
     next_id = 1
     used_ids = set()
+    _MATERIAL_LIBRARY_CACHE = {}
 
     def __init__(self, material_id=None, name='', temperature=None):
         # Initialize class attributes
@@ -1315,6 +1323,7 @@ class Material(IDManagerMixin):
         nuclides_per_cc = defaultdict(float)
         mass_per_cc = defaultdict(float)
         for mat, wgt in zip(materials, wgts):
+            
             for nuc, atoms_per_bcm in mat.get_nuclide_atom_densities().items():
                 nuc_per_cc = wgt*1.e24*atoms_per_bcm
                 nuclides_per_cc[nuc] += nuc_per_cc
@@ -1358,24 +1367,52 @@ class Material(IDManagerMixin):
 
         """
 
-        if library not in MATERIAL_LIBRARIES.keys():
+        lib_path = Path(library).with_suffix('.xml')
+        matches = [p if str(p).endswith(str(lib_path))
+                   for p in openmc.MATERIAL_LIBRARIES.keys()]
+        if not matches:
+            full_path = lib_path.resolve()
+            openmc.MATERIAL_LIBRARIES[full_path] = _find_all_materials(full_path)
+
+        if len(matches) > 1:
+            raise ValueError('duplicate matches for library were found')
+
+        # find if material is in library
+            # 
+        else:
+            # try to open 
+            tree = ET.parse(path)
+            root = tree.getroot()
+
+            # Get all the names of the materials in the library
+            if name in [elem.get('name') for elem in root.findall('material')]:
+                return 
+        if lib_path not in MATERIAL_LIBRARIES.keys():
             msg = (
-                    f'library {library} not found in available libraries. '
-                    f'Supported libraries are {list(MATERIAL_LIBRARIES.keys())}'
+                    f'library {lib_path} not found in available libraries. '
+                    f'Available libraries are: \n'
+                    f'{\n.join(MATERIAL_LIBRARIES.keys())}'
             )
             raise ValueError(msg)
-            
-        global _MATERIAL_LIBRARY_CACHE
+
+
+        #tree = ET.parse(path)
+        #root = tree.getroot()
+
+        ## Generate each material
+        #materials = cls()
+        #for material_elem in root.findall('material'):
+        #    materials_cache[material_elem_name] = material_elem
 
         # loads in the library into the MATERIAL_LIBRARIES if not already loaded
         try:
-            library_data = _MATERIAL_LIBRARY_CACHE[library]
+            library_data = self._MATERIAL_LIBRARY_CACHE[library]
         except KeyError:
             material_objs = openmc.Materials.from_xml(MATERIAL_LIBRARIES[library])
             library_data = {}
             for material_obj in material_objs:
                 library_data[material_obj.name] = material_obj
-            _MATERIAL_LIBRARY_CACHE[library] = library_data
+            self._MATERIAL_LIBRARY_CACHE[library] = library_data
 
         if name not in library_data.keys():
             msg = (
@@ -1389,13 +1426,16 @@ class Material(IDManagerMixin):
         return material_to_add
 
     @classmethod
-    def from_xml_element(cls, elem: ET.Element):
+    def from_xml_element(cls, elem: ET.Element, override_id=False):
         """Generate material from an XML element
 
         Parameters
         ----------
         elem : xml.etree.ElementTree.Element
             XML element
+        override : bool, optional
+            Whether to override the material ID number or not. Defaults to
+            False.
 
         Returns
         -------
@@ -1403,8 +1443,11 @@ class Material(IDManagerMixin):
             Material generated from XML element
 
         """
-        mat_id = int(elem.get('id'))
-        mat = cls(mat_id)
+        if override_id:
+            mat = cls()
+        else:
+            mat_id = int(elem.get('id'))
+            mat = cls(mat_id)
         mat.name = elem.get('name')
 
         if "temperature" in elem.attrib:
