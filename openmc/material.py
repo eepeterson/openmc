@@ -27,35 +27,32 @@ DENSITY_UNITS = ('g/cm3', 'g/cc', 'kg/m3', 'atom/b-cm', 'atom/cm3', 'sum',
                  'macro')
 
 
-# MATERIAL_LIBRARIES maps pathlib.Path objects for a material.xml style file to
-# the list of material names available in that library.
-MATERIAL_LIBRARIES = {}
-
 def _find_materials_in_library(path: PathLike):
-        """Find all the names of materials in a particular file
+    """Find all the names of materials in a particular file
 
-        Parameters
-        ----------
-        path : str or PathLike
-            A PathLike object for the material library XML file
+    Parameters
+    ----------
+    path : str or PathLike
+        A PathLike object for the material library XML file.
 
-        Returns
-        -------
-        material_names : list
-            The list of all the available material names
-        """
-        tree = ET.parse(path)
-        material_elements = tree.getroot().findall('.//material[@name]')
+    Returns
+    -------
+    material_names : list
+        The list of all the available material names.
+    """
+    tree = ET.parse(path)
+    material_elements = tree.getroot().findall('.//material[@name]')
 
-        if not material_elements:
-            raise ValueError('No valid material definitions were found in '
-                             f'file: {path}'
-                             )
-        return [elem.get('name') for elem in material_elements]
+    if not material_elements:
+        raise ValueError('No material definitions with name attributes were '
+                         f'found in file: {path}'
+                         )
+
+    return [elem.get('name') for elem in material_elements]
 
 
 def _get_material_libraries():
-    matlibs = {}
+    """Return a dictionary mapping paths to lists of available materials"""
 
     matlib_dirs = [openmc.data.INTERNAL_DATA_PATH / 'material_libraries']
     if os.environ.get('OPENMC_MATERIAL_LIBRARY_PATH') is not None:
@@ -63,13 +60,11 @@ def _get_material_libraries():
 
     matlib_paths = [f.resolve() for p in matlib_dirs for f in sorted(Path(p).glob('*.xml'))]
 
-    # For all the material library xml files find all the material names 
-    for path in matlib_paths:
-        matlibs[path] = _find_materials_in_library(path)
-
-    return matlibs
+    return {path: _find_materials_in_library(path) for path in matlib_paths}
 
 
+# MATERIAL_LIBRARIES maps pathlib.Path objects for a material.xml style file to
+# the list of material names available in that library.
 MATERIAL_LIBRARIES = _get_material_libraries()
 
 
@@ -1379,17 +1374,22 @@ class Material(IDManagerMixin):
             Northwest National Laboratory Compendium of Material Composition
             Data for Radiation Transport Modeling, available from
             https://www.pnnl.gov/main/publications/external/technical_reports/PNNL-15870Rev2.pdf
+        override_id : bool, optional
+            Whether to override the material ID number or not. Defaults to
+            True.
 
         """
 
         lib_path = Path(library).with_suffix('.xml')
-        matches = [p for p in openmc.MATERIAL_LIBRARIES.keys() if str(p).endswith(str(lib_path))]
+        matches = [p for p in openmc.MATERIAL_LIBRARIES
+                   if str(p).endswith(str(lib_path))]
 
         # Make sure library is unique
         if len(matches) > 1:
             raise ValueError(f'Duplicate matches for library {library} were '
                              f'found: {matches}. Please specify enough of the '
-                             'library name to be considered unique.')
+                             'library name to be considered unique.'
+                             )
 
         # If no matches are detected try to add it to the current library dict
         if not matches:
@@ -1398,21 +1398,23 @@ class Material(IDManagerMixin):
         else:
             full_path = matches[0]
 
+        # Determine if the desired material is in this library
         available_mats = openmc.MATERIAL_LIBRARIES[full_path]
-
         if name not in available_mats:
             raise ValueError(f'material name: {name} could not be found in '
                              f'material library: {full_path}.\nAvailable '
-                             'materials include:\n\t{}'.format('\n\t'.join(available_mats)))
-
+                             'materials include:\n\t'
+                             '{}'.format('\n\t'.join(available_mats))
+                             )
 
         tree = ET.parse(full_path)
         root = tree.getroot()
         mat_elems = root.findall(f".//material/[@name='{name}']")
 
         if len(mat_elems) > 1:
-            raise ValueError('Duplicate material name detected in library '
-                             f'{full_path}')
+            raise ValueError(f"Duplicate material name '{name}' detected in "
+                             f'library {full_path}'
+                             )
 
         return cls.from_xml_element(mat_elems[0], override_id=override_id)
 
@@ -1424,7 +1426,7 @@ class Material(IDManagerMixin):
         ----------
         elem : xml.etree.ElementTree.Element
             XML element
-        override : bool, optional
+        override_id : bool, optional
             Whether to override the material ID number or not. Defaults to
             False.
 
