@@ -1,4 +1,4 @@
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 import os
 from pathlib import Path
 import warnings
@@ -27,6 +27,8 @@ class _Config(MutableMapping):
             del os.environ['OPENMC_CHAIN_FILE']
             # Reset photon source data since it relies on chain file
             _DECAY_PHOTON_ENERGY.clear()
+        elif key == 'material_libraries':
+            del os.environ['OPENMC_MATERIAL_LIBRARIES']
 
     def __setitem__(self, key, value):
         if key == 'cross_sections':
@@ -41,10 +43,22 @@ class _Config(MutableMapping):
             os.environ['OPENMC_CHAIN_FILE'] = str(value)
             # Reset photon source data since it relies on chain file
             _DECAY_PHOTON_ENERGY.clear()
+        elif key == 'material_libraries':
+            # want string or pathlike or iterable thereof
+            if isinstance(value, str):
+                paths = [Path(p).resolve() for p in value.split(':')]
+            elif isinstance(value, os.PathLike):
+                paths = [Path(value).resolve()]
+            elif isinstance(value, Iterable):
+                paths = [Path(p).resolve() for p in value]
+            else:
+                raise TypeError('Invalid type for material_libraries')
+            self._mapping[key] = tuple(paths)
+            os.environ['OPENMC_MATERIAL_LIBRARIES'] = ':'.join(paths)
         else:
             raise KeyError(f'Unrecognized config key: {key}. Acceptable keys '
-                           'are "cross_sections", "mg_cross_sections" and '
-                           '"chain_file"')
+                           'are "cross_sections", "mg_cross_sections", '
+                           '"chain_file", and "material_libraries"')
 
     def __iter__(self):
         return iter(self._mapping)
@@ -85,6 +99,9 @@ def _default_config():
                 break
     if chain_file is not None:
         config['chain_file'] = chain_file
+
+    # Set material library paths
+    matlib_path = os.environ.get("OPENMC_MATERIAL_LIBRARY_PATH")
 
     return config
 
