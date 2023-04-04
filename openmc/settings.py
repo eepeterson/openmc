@@ -26,11 +26,108 @@ class RunMode(Enum):
     VOLUME = 'volume'
     PARTICLE_RESTART = 'particle restart'
 
+    def __repr__(self):
+        return repr(self.value)
+
 
 _RES_SCAT_METHODS = ['dbrc', 'rvs']
 
+class SlotsMeta(type):
+    @classmethod
+    def __prepare__(metaclass, name, bases, **kwds):
+        super_prepared = super().__prepare__(metaclass, name, bases, **kwds)
+        super_prepared['__slots__'] = ()
+        return super_prepared
 
-class Settings:
+
+def __choose_repr(obj, varname=None, with_assign=False, memo=None):
+    """Choose and return correct object representation
+
+    Parameters
+    ----------
+    varname : string, optional
+        The variable name to replace the repr of the object.
+
+    with_assign = False, optional
+        Whether to tack the string 'varname = ' onto the front of the repr
+
+    memo : dict, optional
+        Memo of previously repr'd objects who have been assigned a variable
+        name. Mapping of objects to their local variable name.
+
+    Returns
+    -------
+    string : str
+        A string representing the object in the desired way
+    """
+    if not hasattr(obj, '__repr_pyapi'):
+        return repr(obj)
+
+    if varname is not None:
+        if with_assign:
+            return f'{varname} = {repr(obj)}'
+        else:
+            return varname
+    else:
+        return
+
+
+    # If the object does have a special repr, check if it has been memoized
+    if memo is not None:
+        # If the object is in the memo just return it's variable name
+        if obj in memo:
+            return varname
+        # Otherwise create a local variable assignment to it's repr
+        else:
+            memo[obj] = obj._varname_
+            return __choose_repr(obj, varname=memo[obj], memo=memo)
+        else:
+
+    return obj.__repr__
+
+    return
+
+
+# want 5 different representations of each object:
+# Python API representation (__repr__) so object == eval(repr(object))
+#    want to be able to replace object repr with variable name like so:
+#    repr1(Settings()) = 'openmc.settings.Settings(**kwargs)'
+#    repr2(Settings(), varname, full) = 'varname = openmc.settings.Settings(**kwargs)'
+#    repr3(Settings(), varname) = 'varname'
+#    need to pass memo of existing objects so they can be given 
+#    add special format codes to handle 2 and 3 and default to repr() if object
+#    does not have a specific attribute or subclass ReprWithDefaults
+# XML representation
+# String representation for readability
+class ReprWithDefaults(metaclass=SlotsMeta):
+    __slots__ = ('_defaults', '_xml_repr')
+
+    def __init__(self):
+        super().__init__()
+        self._defaults = {}
+        self._xml_repr = None
+
+    def _init_defaults(self):
+        for var in self.__slots__:
+            self._defaults[var] = getattr(self, var)
+
+    def __repr__(self, varname=None, with_assign=False, memo=None):
+        stub = f'{self.__module__}.{self.__class__.__name__}('
+        hindent = ' '*len(stub)
+        string = ''
+        strlist = []
+        for var in self.__slots__:
+            val = getattr(self, var)
+            if val != self._defaults[var]:
+                strlist.append(f'{var[1:]}={__choose_repr(val)}')
+        return stub + f',\n{hindent}'.join(strlist) +')'
+
+    def __format__(self, code):
+        if code == ["!r"]
+        codes = ('xml', 'variable', 'full')
+
+
+class Settings(ReprWithDefaults):
     """Settings used for an OpenMC simulation.
 
     Parameters
@@ -239,7 +336,57 @@ class Settings:
         Indicate whether to write the initial source distribution to file
     """
 
+    __slots__ = ('_run_mode',
+                 '_particles',
+                 '_batches',
+                 '_inactive',
+                 '_max_lost_particles',
+                 '_rel_max_lost_particles',
+                 '_generations_per_batch',
+                 '_keff_trigger',
+                 '_source',
+                 '_output',
+                 '_statepoint',
+                 '_sourcepoint',
+                 '_surf_source_read',
+                 '_surf_source_write',
+                 '_confidence_intervals',
+                 '_electron_treatment',
+                 '_energy_mode',
+                 '_max_order',
+                 '_photon_transport',
+                 '_ptables',
+                 '_seed',
+                 '_survival_biasing',
+                 '_cutoff',
+                 '_entropy_mesh',
+                 '_trigger_active',
+                 '_trigger_max_batches',
+                 '_trigger_batch_interval',
+                 '_no_reduce',
+                 '_verbosity',
+                 '_tabular_legendre',
+                 '_temperature',
+                 '_trace',
+                 '_track',
+                 '_ufs_mesh',
+                 '_resonance_scattering',
+                 '_volume_calculations',
+                 '_create_fission_neutrons',
+                 '_create_delayed_neutrons',
+                 '_delayed_photon_scaling',
+                 '_event_based',
+                 '_max_particles_in_flight',
+                 '_material_cell_offsets',
+                 '_log_grid_bins',
+                 '_write_initial_source',
+                 '_weight_windows',
+                 '_weight_windows_on',
+                 '_max_splits',
+                 '_max_tracks')
+
     def __init__(self, **kwargs):
+        super().__init__()
         self._run_mode = RunMode.EIGENVALUE
         self._batches = None
         self._generations_per_batch = None
@@ -314,6 +461,8 @@ class Settings:
         self._weight_windows_on = None
         self._max_splits = None
         self._max_tracks = None
+
+        self._init_defaults()
 
         for key, value in kwargs.items():
             setattr(self, key, value)

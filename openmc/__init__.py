@@ -37,5 +37,13 @@ from .config import *
 # Import a few names from the model module
 from openmc.model import rectangular_prism, hexagonal_prism, Model
 
+def _simple_cls_name(obj):
+    name = obj.__class__.__name__
+    func = lambda x, y: '.'.join([x, y])
+    mods = list(itertools.accumulate(obj.__module__.split('.'), func=func))
+    filt = [name in eval(mod).__dict__ for mod in mods]
+    mod = next(itertools.compress(mods, filt))
+    return f'{mod}.{name}'
+
 
 __version__ = '0.13.4-dev'
