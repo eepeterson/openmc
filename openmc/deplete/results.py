@@ -69,6 +69,7 @@ class Results(list):
                 n = fh["number"][...].shape[0]
 
                 for i in range(n):
+                    print(i)
                     data.append(StepResult.from_hdf5(fh, i))
         super().__init__(data)
 
