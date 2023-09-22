@@ -596,7 +596,7 @@ class Chain:
 
         Returns
         -------
-        scipy.sparse.csr_matrix
+        scipy.sparse.csc_matrix
             Sparse matrix representing depletion.
 
         See Also
@@ -713,7 +713,7 @@ class Chain:
 
         Returns
         -------
-        scipy.sparse.csr_matrix
+        scipy.sparse.csc_matrix
             Sparse matrix representing transfer term.
 
         """

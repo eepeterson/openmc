@@ -60,7 +60,7 @@ class IPFCramSolver(DepSystemSolver):
 
         Parameters
         ----------
-        A : scipy.sparse.csr_matrix
+        A : scipy.sparse.csc_matrix
             Sparse transmutation matrix ``A[j, i]`` desribing rates at
             which isotope ``i`` transmutes to isotope ``j``
         n0 : numpy.ndarray
