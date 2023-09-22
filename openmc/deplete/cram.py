@@ -75,11 +75,13 @@ class IPFCramSolver(DepSystemSolver):
             Final compositions after ``dt``
 
         """
-        A = sp.csr_matrix(A * dt, dtype=np.float64)
+        np.save('A.npy', A)
+        np.save('n0.npy', n0)
+        A = sp.csc_matrix(A * dt, dtype=np.float64)
         y = n0.copy()
         ident = sp.eye(A.shape[0])
         for alpha, theta in zip(self.alpha, self.theta):
-            y += 2*np.real(alpha*sla.spsolve(A - theta*ident, y))
+            y += 2*np.real(alpha*sla.splu(A - theta*ident).solve(y))
         return y * self.alpha0
 
 
