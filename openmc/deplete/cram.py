@@ -75,8 +75,6 @@ class IPFCramSolver(DepSystemSolver):
             Final compositions after ``dt``
 
         """
-        np.save('A.npy', A)
-        np.save('n0.npy', n0)
         A = sp.csc_matrix(A * dt, dtype=np.float64)
         y = n0.copy()
         ident = sp.eye(A.shape[0])
