@@ -54,7 +54,7 @@ class PredictorIntegrator(Integrator):
             with predictor
 
         """
-        proc_time, n_end = self._timed_deplete(n, rates, dt)
+        proc_time, n_end = self._timed_deplete(n, rates, dt, source_rate)
         return proc_time, [n_end], []
 
 
