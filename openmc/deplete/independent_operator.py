@@ -311,6 +311,7 @@ class IndependentOperator(OpenMCOperator):
             self.nuc_ind_map = {ind: nuc for nuc, ind in rates.index_nuc.items()}
             self.rx_ind_map = {ind: rxn for rxn, ind in rates.index_rx.items()}
             self._op = op
+            self._results_cache.fill(0.0)
 
         def generate_tallies(self, materials, scores):
             """Unused in this case"""
@@ -332,20 +333,20 @@ class IndependentOperator(OpenMCOperator):
             react_index : list of str
                 Ordering of reactions
             """
-            self._results_cache.fill(0.0)
 
-            # Get flux and microscopic cross sections from operator
-            flux = self._op.fluxes[mat_index]
-            xs = self._op.cross_sections[mat_index]
+            if not np.count_nonzero(self._results_cache):
+                # Get flux and microscopic cross sections from operator
+                flux = self._op.fluxes[mat_index]
+                xs = self._op.cross_sections[mat_index]
 
-            for i_nuc in nuc_index:
-                nuc = self.nuc_ind_map[i_nuc]
-                for i_rx in react_index:
-                    rx = self.rx_ind_map[i_rx]
+                for i_nuc in nuc_index:
+                    nuc = self.nuc_ind_map[i_nuc]
+                    for i_rx in react_index:
+                        rx = self.rx_ind_map[i_rx]
 
-                    # Determine reaction rate by multiplying xs in [b] by flux
-                    # in [n-cm/src] to give [(reactions/src)*b-cm/atom]
-                    self._results_cache[i_nuc, i_rx] = (xs[nuc, rx] * flux).sum()
+                        # Determine reaction rate by multiplying xs in [b] by flux
+                        # in [n-cm/src] to give [(reactions/src)*b-cm/atom]
+                        self._results_cache[i_nuc, i_rx] = (xs[nuc, rx] * flux).sum()
 
             return self._results_cache
 
