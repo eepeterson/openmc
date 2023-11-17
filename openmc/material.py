@@ -277,22 +277,25 @@ class Material(IDManagerMixin):
     def decay_photon_energy(self) -> Optional[Univariate]:
         warnings.warn(
             "The 'decay_photon_energy' property has been replaced by the "
-            "get_decay_photon_energy() method and will be removed in a future "
+            "get_decay_particle_energy() method and will be removed in a future "
             "version.", FutureWarning)
-        return self.get_decay_photon_energy(0.0)
+        return self.get_decay_photon_energy("photon", 0.0)
 
-    def get_decay_photon_energy(
+    def get_decay_particle_energy(
             self,
+            particle: str = "photon",
             clip_tolerance: float = 1e-6,
             units: str = 'Bq',
             volume: Optional[float] = None
         ) -> Optional[Univariate]:
-        r"""Return energy distribution of decay photons from unstable nuclides.
+        r"""Return energy distribution of decay particles from unstable nuclides.
 
         .. versionadded:: 0.14.0
 
         Parameters
         ----------
+        particle : str
+            Particle type of which to obtain decay energy data.
         clip_tolerance : float
             Maximum fraction of :math:`\sum_i x_i p_i` for discrete
             distributions that will be discarded.
@@ -304,8 +307,8 @@ class Material(IDManagerMixin):
 
         Returns
         -------
-        Decay photon energy distribution. The integral of this distribution is
-        the total intensity of the photon source in the requested units.
+        Decay particle energy distribution. The integral of this distribution is
+        the total intensity of the source in the requested units.
 
         """
         cv.check_value('units', units, {'Bq', 'Bq/g', 'Bq/cm3'})
@@ -321,7 +324,8 @@ class Material(IDManagerMixin):
         dists = []
         probs = []
         for nuc, atoms_per_bcm in self.get_nuclide_atom_densities().items():
-            source_per_atom = openmc.data.decay_photon_energy(nuc)
+            print(nuc)
+            source_per_atom = openmc.data.decay_particle_energy(nuc, particle)
             if source_per_atom is not None:
                 dists.append(source_per_atom)
                 probs.append(1e24 * atoms_per_bcm * multiplier)
