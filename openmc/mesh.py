@@ -1659,7 +1659,7 @@ class CylindricalMesh(StructuredMesh):
             r_grid = [float(x) for x in get_text(elem, "r_grid").split()],
             phi_grid = [float(x) for x in get_text(elem, "phi_grid").split()],
             z_grid = [float(x) for x in get_text(elem, "z_grid").split()],
-            origin = [float(x) for x in get_text(elem, "origin", default=[0., 0., 0.]).split()],
+            origin = [float(x) for x in get_text(elem, "origin", default="0. 0. 0.").split()],
             mesh_id=mesh_id,
         )
 
@@ -1951,7 +1951,7 @@ class SphericalMesh(StructuredMesh):
             r_grid = [float(x) for x in get_text(elem, "r_grid").split()],
             theta_grid = [float(x) for x in get_text(elem, "theta_grid").split()],
             phi_grid = [float(x) for x in get_text(elem, "phi_grid").split()],
-            origin = [float(x) for x in get_text(elem, "origin", default=[0., 0., 0.]).split()],
+            origin = [float(x) for x in get_text(elem, "origin", default="0. 0. 0.").split()],
         )
 
         return mesh
