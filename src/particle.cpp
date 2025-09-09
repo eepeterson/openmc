@@ -530,6 +530,21 @@ void Particle::pht_secondary_particles()
   }
 }
 
+// Helper: determine if the surface crossing keeps us in the same cell.
+// Checks whether a point just beyond the surface is still inside the current cell.
+static bool is_internal_surface_crossing(const Particle& p)
+{
+  int32_t i_cell = p.lowest_coord().cell();
+  if (i_cell < 0) return false;
+
+  const auto& cell = model::cells[i_cell];
+  // Step a tiny bit beyond the surface along the current direction
+  Position probe = p.r() + TINY_BIT * p.u();
+
+  // Use SURFACE_NONE so Region::contains doesn’t special-case the on-surface token
+  return cell->contains(probe, p.u(), SURFACE_NONE);
+}
+
 void Particle::cross_surface(const Surface& surf)
 {
 
@@ -545,8 +560,12 @@ void Particle::cross_surface(const Surface& surf)
 
   // Handle any applicable boundary conditions.
   if (surf.bc_ && settings::run_mode != RunMode::PLOTTING) {
-    surf.bc_->handle_particle(*this, surf);
-    return;
+    // Ignore BCs on “internal” surfaces (still inside the same cell just beyond)
+    if (!is_internal_surface_crossing(*this)) {
+      surf.bc_->handle_particle(*this, surf);
+      return;
+    }
+    // else: fall through and treat as a normal transmissive crossing
   }
 
   // ==========================================================================
