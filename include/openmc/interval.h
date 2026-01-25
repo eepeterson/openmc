@@ -38,21 +38,21 @@ struct Interval {
   constexpr double midpoint() const { return 0.5 * (lo + hi); }
 
   // Compound assignment operators
-  constexpr Interval& operator+=(const Interval& other)
+  Interval& operator+=(const Interval& other)
   {
     lo += other.lo;
     hi += other.hi;
     return *this;
   }
 
-  constexpr Interval& operator-=(const Interval& other)
+  Interval& operator-=(const Interval& other)
   {
     lo -= other.hi;
     hi -= other.lo;
     return *this;
   }
 
-  constexpr Interval& operator*=(double val)
+  Interval& operator*=(double val)
   {
     if (val >= 0.0) {
       lo *= val;
@@ -65,30 +65,27 @@ struct Interval {
     return *this;
   }
 
-  constexpr Interval& operator/=(double val)
-  {
-    return *this *= (1.0 / val);
-  }
+  Interval& operator/=(double val) { return *this *= (1.0 / val); }
 
   // Unary negation
-  constexpr Interval operator-() const { return {-hi, -lo}; }
+  Interval operator-() const { return {-hi, -lo}; }
 };
 
 //==============================================================================
 // Binary operators (Interval, Interval)
 //==============================================================================
 
-inline constexpr Interval operator+(Interval a, const Interval& b)
+inline Interval operator+(Interval a, const Interval& b)
 {
   return a += b;
 }
 
-inline constexpr Interval operator-(Interval a, const Interval& b)
+inline Interval operator-(Interval a, const Interval& b)
 {
   return a -= b;
 }
 
-inline constexpr Interval operator*(const Interval& a, const Interval& b)
+inline Interval operator*(const Interval& a, const Interval& b)
 {
   double p1 = a.lo * b.lo;
   double p2 = a.lo * b.hi;
@@ -101,41 +98,41 @@ inline constexpr Interval operator*(const Interval& a, const Interval& b)
 // Binary operators (Interval, scalar) and (scalar, Interval)
 //==============================================================================
 
-inline constexpr Interval operator+(Interval a, double val)
+inline Interval operator+(Interval a, double val)
 {
   a.lo += val;
   a.hi += val;
   return a;
 }
 
-inline constexpr Interval operator+(double val, Interval a)
+inline Interval operator+(double val, Interval a)
 {
   return a + val;
 }
 
-inline constexpr Interval operator-(Interval a, double val)
+inline Interval operator-(Interval a, double val)
 {
   a.lo -= val;
   a.hi -= val;
   return a;
 }
 
-inline constexpr Interval operator-(double val, const Interval& a)
+inline Interval operator-(double val, const Interval& a)
 {
   return {val - a.hi, val - a.lo};
 }
 
-inline constexpr Interval operator*(Interval a, double val)
+inline Interval operator*(Interval a, double val)
 {
   return a *= val;
 }
 
-inline constexpr Interval operator*(double val, Interval a)
+inline Interval operator*(double val, Interval a)
 {
   return a *= val;
 }
 
-inline constexpr Interval operator/(Interval a, double val)
+inline Interval operator/(Interval a, double val)
 {
   return a /= val;
 }
@@ -150,7 +147,7 @@ inline constexpr Interval operator/(Interval a, double val)
 //!   - If lo >= 0: x^2 in [lo^2, hi^2]
 //!   - If hi <= 0: x^2 in [hi^2, lo^2]
 //!   - If lo < 0 < hi: x^2 in [0, max(lo^2, hi^2)]
-inline constexpr Interval interval_sqr(const Interval& x)
+inline Interval interval_sqr(const Interval& x)
 {
   if (x.lo >= 0.0) {
     return {x.lo * x.lo, x.hi * x.hi};

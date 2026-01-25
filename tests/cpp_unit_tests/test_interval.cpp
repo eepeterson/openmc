@@ -35,13 +35,27 @@ TEST_CASE("Interval range constructor")
   REQUIRE(a.hi == 5.0);
 }
 
-TEST_CASE("Interval constexpr construction")
+TEST_CASE("Interval constexpr construction and member functions")
 {
-  // Verify constexpr works at compile time
+  // Verify constexpr works at compile time for struct members
   constexpr Interval a(2.0, 4.0);
   static_assert(a.lo == 2.0, "constexpr lo failed");
   static_assert(a.hi == 4.0, "constexpr hi failed");
+  static_assert(a.is_positive(), "constexpr is_positive failed");
+  static_assert(!a.is_negative(), "constexpr is_negative failed");
+  static_assert(!a.contains_zero(), "constexpr contains_zero failed");
+  static_assert(a.width() == 2.0, "constexpr width failed");
+  static_assert(a.midpoint() == 3.0, "constexpr midpoint failed");
+
+  constexpr Interval b(-3.0, -1.0);
+  static_assert(!b.is_positive(), "constexpr is_positive for negative failed");
+  static_assert(b.is_negative(), "constexpr is_negative for negative failed");
+
+  constexpr Interval c(-1.0, 1.0);
+  static_assert(c.contains_zero(), "constexpr contains_zero spanning failed");
+
   REQUIRE(a.lo == 2.0);
+  REQUIRE(a.hi == 4.0);
 }
 
 //==============================================================================
@@ -716,21 +730,4 @@ TEST_CASE("Chained interval operations")
   // - [1, 2] = [6-2, 10-1] = [4, 9]
   REQUIRE(result.lo == 4.0);
   REQUIRE(result.hi == 9.0);
-}
-
-TEST_CASE("Interval constexpr operations")
-{
-  // Verify constexpr arithmetic works
-  constexpr Interval a(1.0, 2.0);
-  constexpr Interval b(3.0, 4.0);
-  constexpr Interval sum = a + b;
-  static_assert(sum.lo == 4.0, "constexpr addition lo failed");
-  static_assert(sum.hi == 6.0, "constexpr addition hi failed");
-
-  constexpr Interval sq = interval_sqr(a);
-  static_assert(sq.lo == 1.0, "constexpr interval_sqr lo failed");
-  static_assert(sq.hi == 4.0, "constexpr interval_sqr hi failed");
-
-  REQUIRE(sum.lo == 4.0);
-  REQUIRE(sq.hi == 4.0);
 }
