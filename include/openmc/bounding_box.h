@@ -2,8 +2,10 @@
 #define OPENMC_BOUNDING_BOX_H
 
 #include <algorithm> // for min, max
+#include <tuple>
 
 #include "openmc/constants.h"
+#include "openmc/interval.h"
 #include "openmc/position.h"
 
 namespace openmc {
@@ -62,8 +64,24 @@ struct BoundingBox {
     max.z = std::max(max.z, other.max.z);
     return *this;
   }
+
+  //! Get intervals for all three coordinates at once
+  //! \return Tuple of (x, y, z) intervals for use with structured bindings
+  std::tuple<Interval, Interval, Interval> intervals() const
+  {
+    return {{min.x, max.x}, {min.y, max.y}, {min.z, max.z}};
+  }
+
+  //! Get interval for x coordinate
+  Interval x_interval() const { return {min.x, max.x}; }
+
+  //! Get interval for y coordinate
+  Interval y_interval() const { return {min.y, max.y}; }
+
+  //! Get interval for z coordinate
+  Interval z_interval() const { return {min.z, max.z}; }
 };
 
 } // namespace openmc
 
-#endif
+#endif // OPENMC_BOUNDING_BOX_H

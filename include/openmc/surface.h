@@ -12,6 +12,7 @@
 #include "openmc/boundary_condition.h"
 #include "openmc/bounding_box.h"
 #include "openmc/constants.h"
+#include "openmc/interval.h"
 #include "openmc/memory.h" // for unique_ptr
 #include "openmc/particle.h"
 #include "openmc/position.h"
@@ -72,6 +73,15 @@ public:
   //! \param r A 3D Cartesian coordinate.
   virtual double evaluate(Position r) const = 0;
 
+  //! Evaluate the surface equation over a bounding box using interval
+  //! arithmetic.
+  //!
+  //! Returns an interval that bounds the possible values of the surface
+  //! equation for all points within the given bounding box.
+  //! \param box An axis-aligned bounding box.
+  //! \return An interval bounding the surface equation values.
+  virtual Interval evaluate_interval(BoundingBox box) const = 0;
+
   //! Compute the distance between a point and the surface along a ray.
   //! \param r A 3D Cartesian coordinate.
   //! \param u The direction of the ray.
@@ -114,6 +124,7 @@ class SurfaceXPlane : public Surface {
 public:
   explicit SurfaceXPlane(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -132,6 +143,7 @@ class SurfaceYPlane : public Surface {
 public:
   explicit SurfaceYPlane(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -150,6 +162,7 @@ class SurfaceZPlane : public Surface {
 public:
   explicit SurfaceZPlane(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -168,6 +181,7 @@ class SurfacePlane : public Surface {
 public:
   explicit SurfacePlane(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -186,6 +200,7 @@ class SurfaceXCylinder : public Surface {
 public:
   explicit SurfaceXCylinder(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -205,6 +220,7 @@ class SurfaceYCylinder : public Surface {
 public:
   explicit SurfaceYCylinder(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -224,6 +240,7 @@ class SurfaceZCylinder : public Surface {
 public:
   explicit SurfaceZCylinder(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -243,6 +260,7 @@ class SurfaceSphere : public Surface {
 public:
   explicit SurfaceSphere(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -262,6 +280,7 @@ class SurfaceXCone : public Surface {
 public:
   explicit SurfaceXCone(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -280,6 +299,7 @@ class SurfaceYCone : public Surface {
 public:
   explicit SurfaceYCone(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -298,6 +318,7 @@ class SurfaceZCone : public Surface {
 public:
   explicit SurfaceZCone(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -316,6 +337,7 @@ class SurfaceQuadric : public Surface {
 public:
   explicit SurfaceQuadric(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -334,6 +356,7 @@ class SurfaceXTorus : public Surface {
 public:
   explicit SurfaceXTorus(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -351,6 +374,7 @@ class SurfaceYTorus : public Surface {
 public:
   explicit SurfaceYTorus(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;
@@ -368,6 +392,7 @@ class SurfaceZTorus : public Surface {
 public:
   explicit SurfaceZTorus(pugi::xml_node surf_node);
   double evaluate(Position r) const override;
+  Interval evaluate_interval(BoundingBox box) const override;
   double distance(Position r, Direction u, bool coincident) const override;
   Direction normal(Position r) const override;
   void to_hdf5_inner(hid_t group_id) const override;

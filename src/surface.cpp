@@ -9,11 +9,13 @@
 #include <fmt/core.h>
 
 #include "openmc/array.h"
+#include "openmc/bounding_box.h"
 #include "openmc/cell.h"
 #include "openmc/container_util.h"
 #include "openmc/error.h"
 #include "openmc/external/quartic_solver.h"
 #include "openmc/hdf5_interface.h"
+#include "openmc/interval.h"
 #include "openmc/math_functions.h"
 #include "openmc/random_lcg.h"
 #include "openmc/settings.h"
@@ -232,6 +234,11 @@ double SurfaceXPlane::evaluate(Position r) const
   return r.x - x0_;
 }
 
+Interval SurfaceXPlane::evaluate_interval(BoundingBox box) const
+{
+  return box.x_interval() - x0_;
+}
+
 double SurfaceXPlane::distance(Position r, Direction u, bool coincident) const
 {
   return axis_aligned_plane_distance<0>(r, u, coincident, x0_);
@@ -270,6 +277,11 @@ SurfaceYPlane::SurfaceYPlane(pugi::xml_node surf_node) : Surface(surf_node)
 double SurfaceYPlane::evaluate(Position r) const
 {
   return r.y - y0_;
+}
+
+Interval SurfaceYPlane::evaluate_interval(BoundingBox box) const
+{
+  return box.y_interval() - y0_;
 }
 
 double SurfaceYPlane::distance(Position r, Direction u, bool coincident) const
@@ -312,6 +324,11 @@ double SurfaceZPlane::evaluate(Position r) const
   return r.z - z0_;
 }
 
+Interval SurfaceZPlane::evaluate_interval(BoundingBox box) const
+{
+  return box.z_interval() - z0_;
+}
+
 double SurfaceZPlane::distance(Position r, Direction u, bool coincident) const
 {
   return axis_aligned_plane_distance<2>(r, u, coincident, z0_);
@@ -350,6 +367,12 @@ SurfacePlane::SurfacePlane(pugi::xml_node surf_node) : Surface(surf_node)
 double SurfacePlane::evaluate(Position r) const
 {
   return A_ * r.x + B_ * r.y + C_ * r.z - D_;
+}
+
+Interval SurfacePlane::evaluate_interval(BoundingBox box) const
+{
+  auto [x, y, z] = box.intervals();
+  return A_ * x + B_ * y + C_ * z - D_;
 }
 
 double SurfacePlane::distance(Position r, Direction u, bool coincident) const
@@ -392,6 +415,31 @@ double axis_aligned_cylinder_evaluate(
   const double r1 = r.get<i1>() - offset1;
   const double r2 = r.get<i2>() - offset2;
   return r1 * r1 + r2 * r2 - radius * radius;
+}
+
+// Interval arithmetic version for axis-aligned cylinders
+template<int i1, int i2>
+Interval axis_aligned_cylinder_evaluate_interval(
+  BoundingBox box, double offset1, double offset2, double radius)
+{
+  Interval r1, r2;
+  if constexpr (i1 == 0) {
+    r1 = box.x_interval();
+  } else if constexpr (i1 == 1) {
+    r1 = box.y_interval();
+  } else {
+    r1 = box.z_interval();
+  }
+  if constexpr (i2 == 0) {
+    r2 = box.x_interval();
+  } else if constexpr (i2 == 1) {
+    r2 = box.y_interval();
+  } else {
+    r2 = box.z_interval();
+  }
+  r1 = r1 - offset1;
+  r2 = r2 - offset2;
+  return interval_sqr(r1) + interval_sqr(r2) - radius * radius;
 }
 
 // The first template parameter indicates which axis the cylinder is aligned to.
@@ -471,6 +519,11 @@ double SurfaceXCylinder::evaluate(Position r) const
   return axis_aligned_cylinder_evaluate<1, 2>(r, y0_, z0_, radius_);
 }
 
+Interval SurfaceXCylinder::evaluate_interval(BoundingBox box) const
+{
+  return axis_aligned_cylinder_evaluate_interval<1, 2>(box, y0_, z0_, radius_);
+}
+
 double SurfaceXCylinder::distance(
   Position r, Direction u, bool coincident) const
 {
@@ -512,6 +565,11 @@ SurfaceYCylinder::SurfaceYCylinder(pugi::xml_node surf_node)
 double SurfaceYCylinder::evaluate(Position r) const
 {
   return axis_aligned_cylinder_evaluate<0, 2>(r, x0_, z0_, radius_);
+}
+
+Interval SurfaceYCylinder::evaluate_interval(BoundingBox box) const
+{
+  return axis_aligned_cylinder_evaluate_interval<0, 2>(box, x0_, z0_, radius_);
 }
 
 double SurfaceYCylinder::distance(
@@ -558,6 +616,11 @@ double SurfaceZCylinder::evaluate(Position r) const
   return axis_aligned_cylinder_evaluate<0, 1>(r, x0_, y0_, radius_);
 }
 
+Interval SurfaceZCylinder::evaluate_interval(BoundingBox box) const
+{
+  return axis_aligned_cylinder_evaluate_interval<0, 1>(box, x0_, y0_, radius_);
+}
+
 double SurfaceZCylinder::distance(
   Position r, Direction u, bool coincident) const
 {
@@ -602,6 +665,15 @@ double SurfaceSphere::evaluate(Position r) const
   const double y = r.y - y0_;
   const double z = r.z - z0_;
   return x * x + y * y + z * z - radius_ * radius_;
+}
+
+Interval SurfaceSphere::evaluate_interval(BoundingBox box) const
+{
+  auto [x, y, z] = box.intervals();
+  Interval dx = x - x0_;
+  Interval dy = y - y0_;
+  Interval dz = z - z0_;
+  return interval_sqr(dx) + interval_sqr(dy) + interval_sqr(dz) - radius_ * radius_;
 }
 
 double SurfaceSphere::distance(Position r, Direction u, bool coincident) const
@@ -680,6 +752,39 @@ double axis_aligned_cone_evaluate(
   const double r2 = r.get<i2>() - offset2;
   const double r3 = r.get<i3>() - offset3;
   return r2 * r2 + r3 * r3 - radius_sq * r1 * r1;
+}
+
+// Interval arithmetic version for axis-aligned cones
+template<int i1, int i2, int i3>
+Interval axis_aligned_cone_evaluate_interval(BoundingBox box,
+  double offset1, double offset2, double offset3, double radius_sq)
+{
+  Interval r1, r2, r3;
+  if constexpr (i1 == 0) {
+    r1 = box.x_interval();
+  } else if constexpr (i1 == 1) {
+    r1 = box.y_interval();
+  } else {
+    r1 = box.z_interval();
+  }
+  if constexpr (i2 == 0) {
+    r2 = box.x_interval();
+  } else if constexpr (i2 == 1) {
+    r2 = box.y_interval();
+  } else {
+    r2 = box.z_interval();
+  }
+  if constexpr (i3 == 0) {
+    r3 = box.x_interval();
+  } else if constexpr (i3 == 1) {
+    r3 = box.y_interval();
+  } else {
+    r3 = box.z_interval();
+  }
+  r1 = r1 - offset1;
+  r2 = r2 - offset2;
+  r3 = r3 - offset3;
+  return interval_sqr(r2) + interval_sqr(r3) - radius_sq * interval_sqr(r1);
 }
 
 // The first template parameter indicates which axis the cone is aligned to.
@@ -767,6 +872,12 @@ double SurfaceXCone::evaluate(Position r) const
   return axis_aligned_cone_evaluate<0, 1, 2>(r, x0_, y0_, z0_, radius_sq_);
 }
 
+Interval SurfaceXCone::evaluate_interval(BoundingBox box) const
+{
+  return axis_aligned_cone_evaluate_interval<0, 1, 2>(
+    box, x0_, y0_, z0_, radius_sq_);
+}
+
 double SurfaceXCone::distance(Position r, Direction u, bool coincident) const
 {
   return axis_aligned_cone_distance<0, 1, 2>(
@@ -799,6 +910,12 @@ double SurfaceYCone::evaluate(Position r) const
   return axis_aligned_cone_evaluate<1, 0, 2>(r, y0_, x0_, z0_, radius_sq_);
 }
 
+Interval SurfaceYCone::evaluate_interval(BoundingBox box) const
+{
+  return axis_aligned_cone_evaluate_interval<1, 0, 2>(
+    box, y0_, x0_, z0_, radius_sq_);
+}
+
 double SurfaceYCone::distance(Position r, Direction u, bool coincident) const
 {
   return axis_aligned_cone_distance<1, 0, 2>(
@@ -829,6 +946,12 @@ SurfaceZCone::SurfaceZCone(pugi::xml_node surf_node) : Surface(surf_node)
 double SurfaceZCone::evaluate(Position r) const
 {
   return axis_aligned_cone_evaluate<2, 0, 1>(r, z0_, x0_, y0_, radius_sq_);
+}
+
+Interval SurfaceZCone::evaluate_interval(BoundingBox box) const
+{
+  return axis_aligned_cone_evaluate_interval<2, 0, 1>(
+    box, z0_, x0_, y0_, radius_sq_);
 }
 
 double SurfaceZCone::distance(Position r, Direction u, bool coincident) const
@@ -866,6 +989,13 @@ double SurfaceQuadric::evaluate(Position r) const
   const double z = r.z;
   return x * (A_ * x + D_ * y + G_) + y * (B_ * y + E_ * z + H_) +
          z * (C_ * z + F_ * x + J_) + K_;
+}
+
+Interval SurfaceQuadric::evaluate_interval(BoundingBox box) const
+{
+  auto [x, y, z] = box.intervals();
+  return interval_sqr(x) * A_ + interval_sqr(y) * B_ + interval_sqr(z) * C_ +
+         x * y * D_ + y * z * E_ + x * z * F_ + x * G_ + y * H_ + z * J_ + K_;
 }
 
 double SurfaceQuadric::distance(
@@ -1034,6 +1164,17 @@ double SurfaceXTorus::evaluate(Position r) const
          std::pow(std::sqrt(y * y + z * z) - A_, 2) / (C_ * C_) - 1.;
 }
 
+Interval SurfaceXTorus::evaluate_interval(BoundingBox box) const
+{
+  auto [x, y, z] = box.intervals();
+  Interval dx = x - x0_;
+  Interval dy = y - y0_;
+  Interval dz = z - z0_;
+  Interval rho = interval_hypot(dy, dz);
+  return interval_sqr(dx) / (B_ * B_) +
+         interval_sqr(rho - A_) / (C_ * C_) - 1.0;
+}
+
 double SurfaceXTorus::distance(Position r, Direction u, bool coincident) const
 {
   double x = r.x - x0_;
@@ -1087,6 +1228,17 @@ double SurfaceYTorus::evaluate(Position r) const
          std::pow(std::sqrt(x * x + z * z) - A_, 2) / (C_ * C_) - 1.;
 }
 
+Interval SurfaceYTorus::evaluate_interval(BoundingBox box) const
+{
+  auto [x, y, z] = box.intervals();
+  Interval dx = x - x0_;
+  Interval dy = y - y0_;
+  Interval dz = z - z0_;
+  Interval rho = interval_hypot(dx, dz);
+  return interval_sqr(dy) / (B_ * B_) +
+         interval_sqr(rho - A_) / (C_ * C_) - 1.0;
+}
+
 double SurfaceYTorus::distance(Position r, Direction u, bool coincident) const
 {
   double x = r.x - x0_;
@@ -1138,6 +1290,17 @@ double SurfaceZTorus::evaluate(Position r) const
   double z = r.z - z0_;
   return (z * z) / (B_ * B_) +
          std::pow(std::sqrt(x * x + y * y) - A_, 2) / (C_ * C_) - 1.;
+}
+
+Interval SurfaceZTorus::evaluate_interval(BoundingBox box) const
+{
+  auto [x, y, z] = box.intervals();
+  Interval dx = x - x0_;
+  Interval dy = y - y0_;
+  Interval dz = z - z0_;
+  Interval rho = interval_hypot(dx, dy);
+  return interval_sqr(dz) / (B_ * B_) +
+         interval_sqr(rho - A_) / (C_ * C_) - 1.0;
 }
 
 double SurfaceZTorus::distance(Position r, Direction u, bool coincident) const
