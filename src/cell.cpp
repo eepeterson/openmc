@@ -18,6 +18,7 @@
 #include "openmc/error.h"
 #include "openmc/geometry.h"
 #include "openmc/hdf5_interface.h"
+#include "openmc/interval.h"
 #include "openmc/lattice.h"
 #include "openmc/material.h"
 #include "openmc/nuclide.h"
@@ -1036,6 +1037,129 @@ bool Region::contains_complex(Position r, Direction u, int32_t on_surface) const
     }
   }
   return in_cell;
+}
+
+//==============================================================================
+
+BoxClassification Region::classify_box(BoundingBox box) const
+{
+  if (simple_) {
+    return classify_box_simple(box);
+  } else {
+    return classify_box_complex(box);
+  }
+}
+
+//==============================================================================
+
+BoxClassification Region::classify_box_simple(BoundingBox box) const
+{
+  BoxClassification result = BoxClassification::INSIDE;
+  for (int32_t token : expression_) {
+    // Evaluate the surface interval and classify the half-space
+    const Surface& surf = *model::surfaces[std::abs(token) - 1];
+    Interval f = surf.evaluate_interval(box);
+
+    BoxClassification half_space;
+    if (token > 0) {
+      // Positive half-space: want f > 0
+      if (f.lo > 0.0) {
+        half_space = BoxClassification::INSIDE;
+      } else if (f.hi < 0.0) {
+        half_space = BoxClassification::OUTSIDE;
+      } else {
+        half_space = BoxClassification::AMBIGUOUS;
+      }
+    } else {
+      // Negative half-space: want f < 0
+      if (f.hi < 0.0) {
+        half_space = BoxClassification::INSIDE;
+      } else if (f.lo > 0.0) {
+        half_space = BoxClassification::OUTSIDE;
+      } else {
+        half_space = BoxClassification::AMBIGUOUS;
+      }
+    }
+
+    // Intersection: take minimum (most restrictive)
+    result = result & half_space;
+
+    // Short-circuit: if already outside, can't improve
+    if (result == BoxClassification::OUTSIDE) {
+      return result;
+    }
+  }
+  return result;
+}
+
+//==============================================================================
+
+BoxClassification Region::classify_box_complex(BoundingBox box) const
+{
+  BoxClassification result = BoxClassification::INSIDE;
+  int total_depth = 0;
+
+  // For each token
+  for (auto it = expression_.begin(); it != expression_.end(); it++) {
+    int32_t token = *it;
+
+    // If the token is a surface, evaluate the half-space classification
+    // If the token is a union or intersection, check to short circuit
+    if (token < OP_UNION) {
+      // Evaluate the surface interval and classify the half-space
+      const Surface& surf = *model::surfaces[std::abs(token) - 1];
+      Interval f = surf.evaluate_interval(box);
+
+      if (token > 0) {
+        // Positive half-space: want f > 0
+        if (f.lo > 0.0) {
+          result = BoxClassification::INSIDE;
+        } else if (f.hi < 0.0) {
+          result = BoxClassification::OUTSIDE;
+        } else {
+          result = BoxClassification::AMBIGUOUS;
+        }
+      } else {
+        // Negative half-space: want f < 0
+        if (f.hi < 0.0) {
+          result = BoxClassification::INSIDE;
+        } else if (f.lo > 0.0) {
+          result = BoxClassification::OUTSIDE;
+        } else {
+          result = BoxClassification::AMBIGUOUS;
+        }
+      }
+    } else if ((token == OP_UNION && result == BoxClassification::INSIDE) ||
+               (token == OP_INTERSECTION &&
+                 result == BoxClassification::OUTSIDE)) {
+      // Short-circuit: skip the rest of this sub-expression
+      if (total_depth == 0) {
+        return result;
+      }
+
+      total_depth--;
+
+      // Skip tokens until we exit this parenthesized sub-expression
+      int depth = 1;
+      do {
+        it++;
+        int32_t next_token = *it;
+
+        if (next_token > OP_COMPLEMENT) {
+          if (next_token == OP_RIGHT_PAREN) {
+            depth--;
+          } else {
+            depth++;
+          }
+        }
+      } while (depth > 0);
+    } else if (token == OP_LEFT_PAREN) {
+      total_depth++;
+    } else if (token == OP_RIGHT_PAREN) {
+      total_depth--;
+    }
+  }
+  return result;
 }
 
 //==============================================================================

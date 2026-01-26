@@ -1,6 +1,7 @@
 #ifndef OPENMC_CELL_H
 #define OPENMC_CELL_H
 
+#include <algorithm>
 #include <cstdint>
 #include <functional> // for hash
 #include <limits>
@@ -27,6 +28,35 @@ namespace openmc {
 //==============================================================================
 
 enum class Fill { MATERIAL, UNIVERSE, LATTICE };
+
+//! Classification of an axis-aligned bounding box relative to a CSG region
+enum class BoxClassification : int8_t {
+  INSIDE = 1,    //!< Box is entirely inside the region
+  OUTSIDE = -1,  //!< Box is entirely outside the region
+  AMBIGUOUS = 0  //!< Box straddles the region boundary
+};
+
+//! Complement operator for BoxClassification (negates the classification)
+inline BoxClassification operator~(BoxClassification a) noexcept
+{
+  return static_cast<BoxClassification>(-static_cast<int8_t>(a));
+}
+
+//! Intersection operator for BoxClassification (min of the two values)
+inline BoxClassification operator&(
+  BoxClassification a, BoxClassification b) noexcept
+{
+  return static_cast<BoxClassification>(
+    std::min(static_cast<int8_t>(a), static_cast<int8_t>(b)));
+}
+
+//! Union operator for BoxClassification (max of the two values)
+inline BoxClassification operator|(
+  BoxClassification a, BoxClassification b) noexcept
+{
+  return static_cast<BoxClassification>(
+    std::max(static_cast<int8_t>(a), static_cast<int8_t>(b)));
+}
 
 constexpr int32_t OP_LEFT_PAREN {std::numeric_limits<int32_t>::max()};
 constexpr int32_t OP_RIGHT_PAREN {std::numeric_limits<int32_t>::max() - 1};
@@ -87,6 +117,17 @@ public:
   //! Get the BoundingBox for this cell.
   BoundingBox bounding_box(int32_t cell_id) const;
 
+  //! Classify how a bounding box relates to this region.
+  //!
+  //! Determines whether the given axis-aligned bounding box is entirely
+  //! inside, entirely outside, or straddling the boundary of this region
+  //! using interval arithmetic on the CSG expression.
+  //! \param box The axis-aligned bounding box to classify.
+  //! \return INSIDE if box is entirely within the region, OUTSIDE if box is
+  //!   entirely outside the region, or AMBIGUOUS if the box straddles the
+  //!   boundary.
+  BoxClassification classify_box(BoundingBox box) const;
+
   //! Get the CSG expression as a string
   std::string str() const;
 
@@ -122,6 +163,12 @@ private:
 
   //! BoundingBox if the particle is in a complex cell.
   BoundingBox bounding_box_complex(vector<int32_t> postfix) const;
+
+  //! Classify a bounding box for a simple cell (only intersection operators)
+  BoxClassification classify_box_simple(BoundingBox box) const;
+
+  //! Classify a bounding box for a complex cell using infix traversal
+  BoxClassification classify_box_complex(BoundingBox box) const;
 
   //! Enforce precedence between intersections and unions
   void enforce_precedence();
