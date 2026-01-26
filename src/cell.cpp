@@ -1060,29 +1060,29 @@ BoxClassification Region::classify_box_simple(BoundingBox box) const
     const Surface& surf = *model::surfaces[std::abs(token) - 1];
     Interval f = surf.evaluate_interval(box);
 
-    BoxClassification half_space;
+    BoxClassification token_box_class;
     if (token > 0) {
       // Positive half-space: want f > 0
       if (f.lo > 0.0) {
-        half_space = BoxClassification::INSIDE;
+        token_box_class = BoxClassification::INSIDE;
       } else if (f.hi < 0.0) {
-        half_space = BoxClassification::OUTSIDE;
+        token_box_class = BoxClassification::OUTSIDE;
       } else {
-        half_space = BoxClassification::AMBIGUOUS;
+        token_box_class = BoxClassification::AMBIGUOUS;
       }
     } else {
       // Negative half-space: want f < 0
       if (f.hi < 0.0) {
-        half_space = BoxClassification::INSIDE;
+        token_box_class = BoxClassification::INSIDE;
       } else if (f.lo > 0.0) {
-        half_space = BoxClassification::OUTSIDE;
+        token_box_class = BoxClassification::OUTSIDE;
       } else {
-        half_space = BoxClassification::AMBIGUOUS;
+        token_box_class = BoxClassification::AMBIGUOUS;
       }
     }
 
     // Intersection: take minimum (most restrictive)
-    result = result & half_space;
+    result = result & token_box_class;
 
     // Short-circuit: if already outside, can't improve
     if (result == BoxClassification::OUTSIDE) {
