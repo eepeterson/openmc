@@ -80,6 +80,12 @@ struct BoundingBox {
 
   //! Get interval for z coordinate
   Interval z_interval() const { return {min.z, max.z}; }
+
+  //! Get the center point of the bounding box
+  Position center() const
+  {
+    return {0.5 * (min.x + max.x), 0.5 * (min.y + max.y), 0.5 * (min.z + max.z)};
+  }
 };
 
 } // namespace openmc

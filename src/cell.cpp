@@ -1041,6 +1041,60 @@ bool Region::contains_complex(Position r, Direction u, int32_t on_surface) const
 
 //==============================================================================
 
+namespace {
+
+//! Classify a bounding box against a single surface half-space
+//!
+//! Uses interval arithmetic on the surface equation, with centroid
+//! disambiguation for boxes that touch (but don't straddle) the surface.
+//! \param surf The surface to evaluate
+//! \param box The bounding box to classify
+//! \param positive_half_space True if the half-space is f > 0, false if f < 0
+//! \return Classification of the box relative to the half-space
+BoxClassification classify_box_token(
+  const Surface& surf, BoundingBox box, bool positive_half_space)
+{
+  Interval f = surf.evaluate_interval(box);
+
+  if (positive_half_space) {
+    // Positive half-space: inside means f > 0
+    if (f.lo > 0.0) {
+      return BoxClassification::INSIDE;
+    }
+    if (f.hi < 0.0) {
+      return BoxClassification::OUTSIDE;
+    }
+  } else {
+    // Negative half-space: inside means f < 0
+    if (f.hi < 0.0) {
+      return BoxClassification::INSIDE;
+    }
+    if (f.lo > 0.0) {
+      return BoxClassification::OUTSIDE;
+    }
+  }
+
+  // Interval spans or touches zero - check if box merely touches surface
+  // rather than straddling it. If so, the centroid can disambiguate.
+  if (f.lo == 0.0 || f.hi == 0.0) {
+    double f_centroid = surf.evaluate(box.center());
+    if (f_centroid > 0.0) {
+      return positive_half_space ? BoxClassification::INSIDE
+                                 : BoxClassification::OUTSIDE;
+    } else if (f_centroid < 0.0) {
+      return positive_half_space ? BoxClassification::OUTSIDE
+                                 : BoxClassification::INSIDE;
+    }
+    // f_centroid == 0.0: degenerate case, centroid exactly on surface
+  }
+
+  return BoxClassification::AMBIGUOUS;
+}
+
+} // anonymous namespace
+
+//==============================================================================
+
 BoxClassification Region::classify_box(BoundingBox box) const
 {
   if (simple_) {
@@ -1056,30 +1110,8 @@ BoxClassification Region::classify_box_simple(BoundingBox box) const
 {
   BoxClassification result = BoxClassification::INSIDE;
   for (int32_t token : expression_) {
-    // Evaluate the surface interval and classify the half-space
     const Surface& surf = *model::surfaces[std::abs(token) - 1];
-    Interval f = surf.evaluate_interval(box);
-
-    BoxClassification token_box_class;
-    if (token > 0) {
-      // Positive half-space: want f > 0
-      if (f.lo > 0.0) {
-        token_box_class = BoxClassification::INSIDE;
-      } else if (f.hi < 0.0) {
-        token_box_class = BoxClassification::OUTSIDE;
-      } else {
-        token_box_class = BoxClassification::AMBIGUOUS;
-      }
-    } else {
-      // Negative half-space: want f < 0
-      if (f.hi < 0.0) {
-        token_box_class = BoxClassification::INSIDE;
-      } else if (f.lo > 0.0) {
-        token_box_class = BoxClassification::OUTSIDE;
-      } else {
-        token_box_class = BoxClassification::AMBIGUOUS;
-      }
-    }
+    BoxClassification token_box_class = classify_box_token(surf, box, token > 0);
 
     // Intersection: take minimum (most restrictive)
     result = result & token_box_class;
@@ -1106,29 +1138,8 @@ BoxClassification Region::classify_box_complex(BoundingBox box) const
     // If the token is a surface, evaluate the half-space classification
     // If the token is a union or intersection, check to short circuit
     if (token < OP_UNION) {
-      // Evaluate the surface interval and classify the half-space
       const Surface& surf = *model::surfaces[std::abs(token) - 1];
-      Interval f = surf.evaluate_interval(box);
-
-      if (token > 0) {
-        // Positive half-space: want f > 0
-        if (f.lo > 0.0) {
-          result = BoxClassification::INSIDE;
-        } else if (f.hi < 0.0) {
-          result = BoxClassification::OUTSIDE;
-        } else {
-          result = BoxClassification::AMBIGUOUS;
-        }
-      } else {
-        // Negative half-space: want f < 0
-        if (f.hi < 0.0) {
-          result = BoxClassification::INSIDE;
-        } else if (f.lo > 0.0) {
-          result = BoxClassification::OUTSIDE;
-        } else {
-          result = BoxClassification::AMBIGUOUS;
-        }
-      }
+      result = classify_box_token(surf, box, token > 0);
     } else if ((token == OP_UNION && result == BoxClassification::INSIDE) ||
                (token == OP_INTERSECTION &&
                  result == BoxClassification::OUTSIDE)) {
