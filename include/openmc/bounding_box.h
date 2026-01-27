@@ -86,6 +86,28 @@ struct BoundingBox {
   {
     return {0.5 * (min.x + max.x), 0.5 * (min.y + max.y), 0.5 * (min.z + max.z)};
   }
+
+  //! Get the volume of the bounding box
+  double volume() const
+  {
+    return (max.x - min.x) * (max.y - min.y) * (max.z - min.z);
+  }
+
+  //! Get the i-th octant (child box) of this bounding box
+  //!
+  //! The octants are numbered 0-7 using bit flags:
+  //!   bit 0 (1): high-x vs low-x
+  //!   bit 1 (2): high-y vs low-y
+  //!   bit 2 (4): high-z vs low-z
+  //! \param i Octant index in [0, 7]
+  //! \return The bounding box for that octant
+  BoundingBox octant(int i) const
+  {
+    Position c = center();
+    return {
+      {(i & 1) ? c.x : min.x, (i & 2) ? c.y : min.y, (i & 4) ? c.z : min.z},
+      {(i & 1) ? max.x : c.x, (i & 2) ? max.y : c.y, (i & 4) ? max.z : c.z}};
+  }
 };
 
 } // namespace openmc

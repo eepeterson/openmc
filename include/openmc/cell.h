@@ -6,6 +6,7 @@
 #include <functional> // for hash
 #include <limits>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -127,6 +128,40 @@ public:
   //!   entirely outside the region, or AMBIGUOUS if the box straddles the
   //!   boundary.
   BoxClassification classify_box(BoundingBox box) const;
+
+  //! Compute the volume of this region using octree decomposition.
+  //!
+  //! Uses a recursive branch-and-bound algorithm with interval arithmetic
+  //! to classify boxes as inside, outside, or ambiguous. The volume is
+  //! computed exactly for inside boxes and estimated as half the box volume
+  //! for ambiguous boxes at the maximum depth.
+  //! \param root_box The bounding box to use as the root of the octree
+  //! \param max_depth Maximum recursion depth (error ~ 1/2^max_depth)
+  //! \return Estimated volume of the region within root_box
+  double volume_octree(BoundingBox root_box, int max_depth) const;
+
+  //! Compute volume with error bounds using octree decomposition.
+  //!
+  //! Like volume_octree(), but also returns the total ambiguous volume
+  //! which provides an error bound on the estimate.
+  //! \param root_box The bounding box to use as the root of the octree
+  //! \param max_depth Maximum recursion depth
+  //! \return Pair of (estimated_volume, ambiguous_volume)
+  std::pair<double, double> volume_octree_with_error(
+    BoundingBox root_box, int max_depth) const;
+
+  //! Hybrid volume calculation: octree decomposition + stochastic sampling.
+  //!
+  //! Uses octree to quickly classify large regions as inside/outside,
+  //! then applies stochastic sampling within remaining ambiguous voxels.
+  //! This combines the speed of octree elimination with the accuracy of
+  //! Monte Carlo sampling.
+  //! \param root_box The bounding box to use as the root of the octree
+  //! \param octree_depth Depth for octree decomposition phase
+  //! \param samples_per_voxel Number of random samples per ambiguous voxel
+  //! \return Tuple of (volume, std_dev, n_ambiguous_voxels)
+  std::tuple<double, double, int> volume_hybrid(
+    BoundingBox root_box, int octree_depth, int samples_per_voxel) const;
 
   //! Get the CSG expression as a string
   std::string str() const;
