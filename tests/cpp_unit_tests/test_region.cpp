@@ -255,3 +255,165 @@ TEST_CASE("Test classify_box intersection operator correctness")
   openmc::BoundingBox box({0.5, -1.0, -1.0}, {1.5, 1.0, 1.0});
   REQUIRE(region.classify_box(box) == openmc::BoxClassification::AMBIGUOUS);
 }
+
+//==============================================================================
+// Volume calculation tests
+//==============================================================================
+
+// Fixture that creates surfaces suitable for volume calculation testing
+class VolumeCalcFixture {
+public:
+  VolumeCalcFixture()
+  {
+    // Create 6 planes to form a unit cube centered at origin
+    // Planes at x = -0.5, x = 0.5, y = -0.5, y = 0.5, z = -0.5, z = 0.5
+    pugi::xml_document doc;
+    pugi::xml_node surf_node = doc.append_child("surface");
+
+    // x-planes
+    surf_node.append_attribute("id") = 1;
+    surf_node.append_attribute("type") = "x-plane";
+    surf_node.append_attribute("coeffs") = "-0.5";
+    openmc::model::surfaces.push_back(
+      std::make_unique<openmc::SurfaceXPlane>(surf_node));
+    openmc::model::surface_map[1] = 0;
+
+    surf_node.attribute("id") = 2;
+    surf_node.attribute("coeffs") = "0.5";
+    openmc::model::surfaces.push_back(
+      std::make_unique<openmc::SurfaceXPlane>(surf_node));
+    openmc::model::surface_map[2] = 1;
+
+    // y-planes
+    surf_node.attribute("id") = 3;
+    surf_node.attribute("type") = "y-plane";
+    surf_node.attribute("coeffs") = "-0.5";
+    openmc::model::surfaces.push_back(
+      std::make_unique<openmc::SurfaceYPlane>(surf_node));
+    openmc::model::surface_map[3] = 2;
+
+    surf_node.attribute("id") = 4;
+    surf_node.attribute("coeffs") = "0.5";
+    openmc::model::surfaces.push_back(
+      std::make_unique<openmc::SurfaceYPlane>(surf_node));
+    openmc::model::surface_map[4] = 3;
+
+    // z-planes
+    surf_node.attribute("id") = 5;
+    surf_node.attribute("type") = "z-plane";
+    surf_node.attribute("coeffs") = "-0.5";
+    openmc::model::surfaces.push_back(
+      std::make_unique<openmc::SurfaceZPlane>(surf_node));
+    openmc::model::surface_map[5] = 4;
+
+    surf_node.attribute("id") = 6;
+    surf_node.attribute("coeffs") = "0.5";
+    openmc::model::surfaces.push_back(
+      std::make_unique<openmc::SurfaceZPlane>(surf_node));
+    openmc::model::surface_map[6] = 5;
+
+    // Also create a sphere for curved surface testing
+    // Sphere of radius 0.4 centered at origin
+    surf_node.attribute("id") = 7;
+    surf_node.attribute("type") = "sphere";
+    surf_node.attribute("coeffs") = "0 0 0 0.4";
+    openmc::model::surfaces.push_back(
+      std::make_unique<openmc::SurfaceSphere>(surf_node));
+    openmc::model::surface_map[7] = 6;
+  }
+
+  ~VolumeCalcFixture()
+  {
+    openmc::model::surfaces.clear();
+    openmc::model::surface_map.clear();
+  }
+};
+
+TEST_CASE("Test calculate_volume for unit cube")
+{
+  VolumeCalcFixture fixture;
+
+  // Region: 1 -2 3 -4 5 -6 defines a unit cube from (-0.5,-0.5,-0.5) to (0.5,0.5,0.5)
+  // This means: x > -0.5 AND x < 0.5 AND y > -0.5 AND y < 0.5 AND z > -0.5 AND z < 0.5
+  auto region = openmc::Region("1 -2 3 -4 5 -6", 0);
+
+  // Bounding box that contains the cube with some margin
+  openmc::BoundingBox bounds({-1.0, -1.0, -1.0}, {1.0, 1.0, 1.0});
+
+  // Calculate volume - exact answer is 1.0
+  auto result = region.calculate_volume(bounds);
+
+  REQUIRE(result.volume > 0.99);
+  REQUIRE(result.volume < 1.01);
+  // Uncertainty should be small
+  REQUIRE(result.std_dev < 0.01);
+}
+
+TEST_CASE("Test calculate_volume with tight bounding box")
+{
+  VolumeCalcFixture fixture;
+
+  // Same unit cube region
+  auto region = openmc::Region("1 -2 3 -4 5 -6", 0);
+
+  // Tight bounding box exactly matching the cube
+  openmc::BoundingBox bounds({-0.5, -0.5, -0.5}, {0.5, 0.5, 0.5});
+
+  // With tight bounds, the entire region should classify as INSIDE
+  // meaning we get exact volume with zero uncertainty
+  auto result = region.calculate_volume(bounds);
+
+  REQUIRE(result.volume == 1.0);
+  REQUIRE(result.std_dev == 0.0);
+  REQUIRE(result.samples == 0);
+}
+
+TEST_CASE("Test calculate_volume for sphere")
+{
+  VolumeCalcFixture fixture;
+
+  // Region: -7 means inside the sphere of radius 0.4
+  auto region = openmc::Region("-7", 0);
+
+  // Bounding box containing the sphere
+  openmc::BoundingBox bounds({-0.5, -0.5, -0.5}, {0.5, 0.5, 0.5});
+
+  // Calculate volume - exact answer is (4/3) * pi * r^3 = (4/3) * pi * 0.4^3 ≈ 0.268
+  auto result = region.calculate_volume(bounds);
+  double expected = (4.0 / 3.0) * 3.14159265358979 * 0.4 * 0.4 * 0.4;
+
+  // Should be within 2% of expected
+  REQUIRE(result.volume > expected * 0.98);
+  REQUIRE(result.volume < expected * 1.02);
+  // Non-zero samples since sphere surface creates ambiguous regions
+  REQUIRE(result.samples > 0);
+}
+
+TEST_CASE("Test octree efficiency - cube benefits from definite classification")
+{
+  VolumeCalcFixture fixture;
+
+  // Unit cube region
+  auto region = openmc::Region("1 -2 3 -4 5 -6", 0);
+
+  // Bounding box 2x the cube in each dimension (8x volume)
+  openmc::BoundingBox bounds({-1.0, -1.0, -1.0}, {1.0, 1.0, 1.0});
+
+  // With depth=0 (no subdivision), everything is ambiguous (1 box gets all samples)
+  auto shallow = region.calculate_volume(bounds, 0, 10000);
+
+  // With depth=6 (good subdivision), the INSIDE and OUTSIDE regions
+  // should be identified, reducing samples needed
+  auto deep = region.calculate_volume(bounds, 6, 100000);
+
+  // Both should give correct volume (within tolerance)
+  REQUIRE(shallow.volume > 0.95);
+  REQUIRE(shallow.volume < 1.05);
+  REQUIRE(deep.volume > 0.99);
+  REQUIRE(deep.volume < 1.01);
+
+  // Deep octree should have lower uncertainty for similar compute
+  // (fewer samples but smarter placement)
+  REQUIRE(deep.std_dev < shallow.std_dev);
+}
+

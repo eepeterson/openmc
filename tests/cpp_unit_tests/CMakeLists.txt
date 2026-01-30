@@ -16,3 +16,7 @@ foreach(test ${TEST_NAMES})
   target_link_libraries(${test} Catch2::Catch2WithMain libopenmc)
   add_test(NAME ${test} COMMAND ${test} WORKING_DIRECTORY ${UNIT_TEST_BIN_OUTPUT_DIR})
 endforeach()
+
+# Benchmark executable (not a test, just for manual performance analysis)
+add_executable(benchmark_volume benchmark_volume.cpp)
+target_link_libraries(benchmark_volume libopenmc)

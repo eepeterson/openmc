@@ -21,7 +21,10 @@
 #include "openmc/interval.h"
 #include "openmc/lattice.h"
 #include "openmc/material.h"
+#include "openmc/message_passing.h"
 #include "openmc/nuclide.h"
+#include "openmc/openmp_interface.h"
+#include "openmc/random_lcg.h"
 #include "openmc/settings.h"
 #include "openmc/xml_interface.h"
 
@@ -1262,6 +1265,146 @@ vector<int32_t> Region::surfaces() const
   }
 
   return surfaces;
+}
+
+//==============================================================================
+
+VolumeResult Region::calculate_volume(
+  BoundingBox root_box, int max_depth, int total_samples) const
+{
+  // Phase 1: Octree classification (serial)
+  // Collect ambiguous leaf boxes and definite volume from INSIDE regions
+  struct WorkItem {
+    BoundingBox box;
+    int depth;
+  };
+
+  vector<WorkItem> stack;
+  stack.push_back({root_box, 0});
+
+  double definite_volume = 0.0;      // Volume from INSIDE regions (exact)
+  vector<BoundingBox> ambiguous_boxes; // Boxes requiring stochastic sampling
+
+  while (!stack.empty()) {
+    auto [box, depth] = stack.back();
+    stack.pop_back();
+
+    BoxClassification classification = classify_box(box);
+
+    if (classification == BoxClassification::INSIDE) {
+      // Entire box is inside - add exact volume
+      definite_volume += box.volume();
+
+    } else if (classification == BoxClassification::OUTSIDE) {
+      // Entire box is outside - contributes nothing
+      continue;
+
+    } else {
+      // AMBIGUOUS - either subdivide or collect for sampling
+      if (depth < max_depth) {
+        // Subdivide into 8 octants
+        for (int i = 0; i < 8; ++i) {
+          stack.push_back({box.octant(i), depth + 1});
+        }
+      } else {
+        // At max depth - add to list for stochastic sampling
+        ambiguous_boxes.push_back(box);
+      }
+    }
+  }
+
+  // If no ambiguous boxes, return exact result
+  if (ambiguous_boxes.empty()) {
+    return {definite_volume, 0.0, 0};
+  }
+
+  // Compute samples per box with MIN_SAMPLES_PER_BOX floor
+  int num_boxes = static_cast<int>(ambiguous_boxes.size());
+  int samples_per_box = std::max(MIN_SAMPLES_PER_BOX, total_samples / num_boxes);
+
+  // Distribute boxes across MPI ranks
+  int64_t i_start, i_end;
+#ifdef OPENMC_MPI
+  int64_t min_boxes = num_boxes / mpi::n_procs;
+  int64_t remainder = num_boxes % mpi::n_procs;
+  if (mpi::rank < remainder) {
+    i_start = (min_boxes + 1) * mpi::rank;
+    i_end = i_start + min_boxes + 1;
+  } else {
+    i_start = (min_boxes + 1) * remainder + (mpi::rank - remainder) * min_boxes;
+    i_end = i_start + min_boxes;
+  }
+#else
+  i_start = 0;
+  i_end = num_boxes;
+#endif
+
+  // Phase 2: Stochastic sampling (parallel with OpenMP)
+  double stochastic_volume = 0.0;
+  double stochastic_var = 0.0;
+  int local_samples = 0;
+
+  Direction u {1.0 / std::sqrt(3.0), 1.0 / std::sqrt(3.0),
+    1.0 / std::sqrt(3.0)};
+
+#pragma omp parallel reduction(+:stochastic_volume, stochastic_var, local_samples)
+  {
+#pragma omp for schedule(dynamic)
+    for (int64_t i = i_start; i < i_end; ++i) {
+      const BoundingBox& box = ambiguous_boxes[i];
+
+      // Initialize seed based on box index for reproducibility
+      uint64_t seed = init_seed(i, STREAM_VOLUME);
+
+      int hits = 0;
+      for (int s = 0; s < samples_per_box; ++s) {
+        double rx = prn(&seed);
+        double ry = prn(&seed);
+        double rz = prn(&seed);
+
+        Position p {box.min.x + rx * (box.max.x - box.min.x),
+          box.min.y + ry * (box.max.y - box.min.y),
+          box.min.z + rz * (box.max.z - box.min.z)};
+
+        if (this->contains(p, u, 0)) {
+          ++hits;
+        }
+      }
+
+      // Compute contribution from this box
+      double f = static_cast<double>(hits) / samples_per_box;
+      double box_vol = box.volume();
+      double var_f = f * (1.0 - f) / samples_per_box;
+
+      stochastic_volume += f * box_vol;
+      stochastic_var += var_f * box_vol * box_vol;
+      local_samples += samples_per_box;
+    }
+  } // end omp parallel
+
+  // Reduce results across MPI ranks
+#ifdef OPENMC_MPI
+  double global_stochastic_volume = 0.0;
+  double global_stochastic_var = 0.0;
+  int global_samples = 0;
+
+  MPI_Allreduce(&stochastic_volume, &global_stochastic_volume, 1, MPI_DOUBLE,
+    MPI_SUM, mpi::intracomm);
+  MPI_Allreduce(&stochastic_var, &global_stochastic_var, 1, MPI_DOUBLE,
+    MPI_SUM, mpi::intracomm);
+  MPI_Allreduce(&local_samples, &global_samples, 1, MPI_INT,
+    MPI_SUM, mpi::intracomm);
+
+  stochastic_volume = global_stochastic_volume;
+  stochastic_var = global_stochastic_var;
+  local_samples = global_samples;
+#endif
+
+  // Combine results
+  double total_volume = definite_volume + stochastic_volume;
+  double std_dev = std::sqrt(stochastic_var);
+
+  return {total_volume, std_dev, local_samples};
 }
 
 //==============================================================================

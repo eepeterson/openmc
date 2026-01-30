@@ -82,6 +82,23 @@ extern vector<unique_ptr<Cell>> cells;
 } // namespace model
 
 //==============================================================================
+// Constants for volume calculation
+//==============================================================================
+
+//! Minimum number of stochastic samples per ambiguous box
+constexpr int MIN_SAMPLES_PER_BOX {10};
+
+//==============================================================================
+//! Result from a volume calculation
+//==============================================================================
+
+struct VolumeResult {
+  double volume {0.0};      //!< Calculated volume
+  double std_dev {0.0};     //!< Standard deviation of the volume estimate
+  int samples {0};          //!< Number of stochastic samples used
+};
+
+//==============================================================================
 
 class Region {
 public:
@@ -133,6 +150,25 @@ public:
 
   //! Get a vector containing all the surfaces in the region expression
   vector<int32_t> surfaces() const;
+
+  //! Calculate the volume of this region using hybrid octree/stochastic method.
+  //!
+  //! Uses an octree to recursively subdivide the bounding box, classifying
+  //! each subregion as INSIDE, OUTSIDE, or AMBIGUOUS. Regions classified as
+  //! INSIDE contribute exact volume with zero uncertainty. Only AMBIGUOUS
+  //! regions require stochastic point sampling.
+  //!
+  //! This method is parallelized using OpenMP across ambiguous leaf boxes.
+  //! In MPI builds, samples are distributed across MPI ranks.
+  //!
+  //! \param root_box Bounding box within which to calculate volume
+  //! \param max_depth Maximum octree depth (default: 6, gives 8^6 = 262k voxels)
+  //! \param total_samples Total number of samples across all ambiguous boxes.
+  //!   The samples are distributed evenly, with a floor of MIN_SAMPLES_PER_BOX
+  //!   per box (default: 100000)
+  //! \return VolumeResult with volume, standard deviation, and sample count
+  VolumeResult calculate_volume(BoundingBox root_box, int max_depth = 6,
+    int total_samples = 100000) const;
 
   //----------------------------------------------------------------------------
   // Accessors
