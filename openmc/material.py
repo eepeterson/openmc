@@ -1750,11 +1750,10 @@ class Material(IDManagerMixin):
         if library_path is not None:
             lib = MaterialLibrary(paths=library_path)
         else:
-            global _material_library_cache
-            if _material_library_cache is None:
-                _material_library_cache = MaterialLibrary()
-                _material_library_cache.load_from_path()
-            lib = _material_library_cache
+            if MaterialLibrary._default_instance is None:
+                MaterialLibrary._default_instance = MaterialLibrary()
+                MaterialLibrary._default_instance.load_from_path()
+            lib = MaterialLibrary._default_instance
         return lib.get_material(material_name, **kwargs)
 
     @classmethod
@@ -2226,21 +2225,6 @@ class Materials(cv.CheckedList):
         return all_depleted_materials
 
 
-# Module-level cache for the default MaterialLibrary used by
-# Material.from_library().  Populated on first call; reset by
-# calling _clear_material_library_cache().
-_material_library_cache: 'MaterialLibrary | None' = None
-
-
-def _clear_material_library_cache():
-    """Clear the cached :class:`MaterialLibrary`.
-
-    Call this if you change ``openmc.config['material_library_path']``
-    after having already called :meth:`Material.from_library` and want
-    the next call to pick up the new path.
-    """
-    global _material_library_cache
-    _material_library_cache = None
 
 
 class MaterialLibrary:
@@ -2275,6 +2259,8 @@ class MaterialLibrary:
 
     """
 
+    _default_instance: 'MaterialLibrary | None' = None
+
     def __init__(self, paths=None):
         # Mapping from material name -> (lxml Element, source file path)
         self._index: dict[str, tuple[ET._Element, Path]] = {}
@@ -2292,6 +2278,16 @@ class MaterialLibrary:
     # ------------------------------------------------------------------
     # Loading methods
     # ------------------------------------------------------------------
+
+    @classmethod
+    def clear_cache(cls):
+        """Clear the cached default library instance.
+
+        Call this if you change ``openmc.config['material_library_path']``
+        after having already called :meth:`Material.from_library` and
+        want the next call to pick up the new path.
+        """
+        cls._default_instance = None
 
     def load_file(self, path: PathLike) -> None:
         """Load materials from a single library XML file.
