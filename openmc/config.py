@@ -232,6 +232,11 @@ class _Config(MutableMapping):
                 self[key] = previous_value
 
 
+def _builtin_materials_path() -> Path:
+    """Return the path to the built-in materials data directory."""
+    return Path(__file__).parent / 'data' / 'materials'
+
+
 def _default_config(**kwargs) -> _Config:
     """Create a configuration initialized from environment variables.
 
@@ -253,6 +258,13 @@ def _default_config(**kwargs) -> _Config:
     for key, var in _Config._LIST_PATH_KEYS.items():
         if var in os.environ:
             config[key] = os.environ[var]
+
+    # Always include the built-in materials directory
+    builtin = _builtin_materials_path()
+    if builtin.is_dir():
+        existing = config.get('material_library_path', [])
+        if builtin not in existing:
+            config['material_library_path'] = list(existing) + [builtin]
 
     chain_file = config.get("chain_file")
     xs_path = config.get("cross_sections")
