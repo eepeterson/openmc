@@ -1750,8 +1750,11 @@ class Material(IDManagerMixin):
         if library_path is not None:
             lib = MaterialLibrary(paths=library_path)
         else:
-            lib = MaterialLibrary()
-            lib.load_from_path()
+            global _material_library_cache
+            if _material_library_cache is None:
+                _material_library_cache = MaterialLibrary()
+                _material_library_cache.load_from_path()
+            lib = _material_library_cache
         return lib.get_material(material_name, **kwargs)
 
     @classmethod
@@ -2221,6 +2224,23 @@ class Materials(cv.CheckedList):
             }
 
         return all_depleted_materials
+
+
+# Module-level cache for the default MaterialLibrary used by
+# Material.from_library().  Populated on first call; reset by
+# calling _clear_material_library_cache().
+_material_library_cache: 'MaterialLibrary | None' = None
+
+
+def _clear_material_library_cache():
+    """Clear the cached :class:`MaterialLibrary`.
+
+    Call this if you change ``openmc.config['material_library_path']``
+    after having already called :meth:`Material.from_library` and want
+    the next call to pick up the new path.
+    """
+    global _material_library_cache
+    _material_library_cache = None
 
 
 class MaterialLibrary:
