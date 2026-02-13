@@ -1714,7 +1714,7 @@ class Material(IDManagerMixin):
         return new_mat
 
     @classmethod
-    def from_library(cls, library_name: str, *, library_path=None, **kwargs):
+    def from_library(cls, material_name: str, *, library_path=None, **kwargs):
         """Create a material from a material library definition.
 
         This is a convenience method that uses a module-level
@@ -1723,7 +1723,7 @@ class Material(IDManagerMixin):
 
         Parameters
         ----------
-        library_name : str
+        material_name : str
             Name of the material as it appears in the library file
             (e.g., ``'SS-316'``).
         library_path : str, Path, or iterable of str/Path, optional
@@ -1752,7 +1752,7 @@ class Material(IDManagerMixin):
         else:
             lib = MaterialLibrary()
             lib.load_from_path()
-        return lib.get_material(library_name, **kwargs)
+        return lib.get_material(material_name, **kwargs)
 
     @classmethod
     def from_xml_element(cls, elem: ET.Element) -> Material:
@@ -2421,7 +2421,7 @@ class MaterialLibrary:
 
     def get_material(
         self,
-        library_name: str,
+        material_name: str,
         *,
         name: str | None = None,
         material_id: int | None = None,
@@ -2439,11 +2439,13 @@ class MaterialLibrary:
 
         Parameters
         ----------
-        library_name : str
-            Name of the material as it appears in the library file.
+        material_name : str
+            Name of the material as it appears in the library file
+            (matched against the ``name`` attribute of each
+            ``<material>`` element).
         name : str, optional
             Override the name given to the :class:`Material`.  Defaults
-            to *library_name*.
+            to *material_name*.
         material_id : int, optional
             Explicit material ID.  If *None*, an ID is auto-assigned.
         temperature : float, optional
@@ -2463,7 +2465,7 @@ class MaterialLibrary:
         Raises
         ------
         KeyError
-            If *library_name* is not found in the library.
+            If *material_name* is not found in the library.
 
         Examples
         --------
@@ -2474,18 +2476,18 @@ class MaterialLibrary:
         ...                              temperature=600.0)
 
         """
-        if library_name not in self._index:
+        if material_name not in self._index:
             available = ', '.join(f"'{n}'" for n in self._index)
             raise KeyError(
-                f"Material '{library_name}' not found in library.  "
+                f"Material '{material_name}' not found in library.  "
                 f"Available materials: {available}"
             )
 
-        elem, source = self._index[library_name]
+        elem, source = self._index[material_name]
 
-        # Use library_name as Material name unless overridden
+        # Use material_name as Material name unless overridden
         if name is None:
-            name = library_name
+            name = material_name
 
         # Parse temperature from library element if not overridden
         if temperature is None:
