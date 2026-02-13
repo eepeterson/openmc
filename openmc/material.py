@@ -1714,6 +1714,47 @@ class Material(IDManagerMixin):
         return new_mat
 
     @classmethod
+    def from_library(cls, library_name: str, *, library_path=None, **kwargs):
+        """Create a material from a material library definition.
+
+        This is a convenience method that uses a module-level
+        :class:`MaterialLibrary` loaded from the configured search path
+        (see ``openmc.config['material_library_path']``).
+
+        Parameters
+        ----------
+        library_name : str
+            Name of the material as it appears in the library file
+            (e.g., ``'SS-316'``).
+        library_path : str, Path, or iterable of str/Path, optional
+            Directories or files to search.  If *None*, uses
+            ``openmc.config['material_library_path']``.
+        **kwargs
+            Override keyword arguments forwarded to
+            :meth:`MaterialLibrary.get_material` (``name``,
+            ``material_id``, ``temperature``, ``density``,
+            ``density_units``, ``depletable``).
+
+        Returns
+        -------
+        Material
+            A new material with auto-assigned ID.
+
+        Examples
+        --------
+        >>> steel = openmc.Material.from_library('SS-316')
+        >>> steel_hot = openmc.Material.from_library(
+        ...     'SS-316', name='Hot Steel', temperature=600.0)
+
+        """
+        if library_path is not None:
+            lib = MaterialLibrary(paths=library_path)
+        else:
+            lib = MaterialLibrary()
+            lib.load_from_path()
+        return lib.get_material(library_name, **kwargs)
+
+    @classmethod
     def from_xml_element(cls, elem: ET.Element) -> Material:
         """Generate material from an XML element
 
