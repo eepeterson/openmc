@@ -16,8 +16,8 @@ from collections.abc import MutableMapping
 from contextlib import contextmanager
 import os
 from pathlib import Path
+from typing import Any, Dict, Iterator, List
 import warnings
-from typing import Any, Dict, Iterator
 
 from openmc.data import DataLibrary
 from openmc.data.decay import _DECAY_ENERGY, _DECAY_PHOTON_ENERGY
@@ -43,6 +43,13 @@ class _Config(MutableMapping):
         Path to a depletion chain XML file. Also sets/unsets the
         OPENMC_CHAIN_FILE environment variable. Setting or deleting this
         clears internal decay data caches.
+    material_library_path : list of pathlib.Path
+        List of directories to search for material composition library
+        files. Also sets/unsets the OPENMC_MATERIAL_LIBRARY_PATH
+        environment variable. Directories are separated by the
+        platform-specific path separator (colon on POSIX, semicolon on
+        Windows). Directories are searched in order; the first match
+        wins.
     resolve_paths : bool
         If True (default), all paths assigned are resolved to absolute
         paths. If False, paths are stored as they are provided.
@@ -52,6 +59,10 @@ class _Config(MutableMapping):
         'cross_sections': 'OPENMC_CROSS_SECTIONS',
         'mg_cross_sections': 'OPENMC_MG_CROSS_SECTIONS',
         'chain_file': 'OPENMC_CHAIN_FILE'
+    }
+
+    _LIST_PATH_KEYS: Dict[str, str] = {
+        'material_library_path': 'OPENMC_MATERIAL_LIBRARY_PATH'
     }
 
     def __init__(self, data: dict = ()):
@@ -74,6 +85,10 @@ class _Config(MutableMapping):
         del self._mapping[key]
         if key in self._PATH_KEYS:
             env_var = self._PATH_KEYS[key]
+            if env_var in os.environ:
+                del os.environ[env_var]
+        elif key in self._LIST_PATH_KEYS:
+            env_var = self._LIST_PATH_KEYS[key]
             if env_var in os.environ:
                 del os.environ[env_var]
         if key == 'chain_file':
@@ -109,12 +124,28 @@ class _Config(MutableMapping):
             if not stored_path.exists():
                 warnings.warn(f"Path '{stored_path}' does not exist.", UserWarning)
 
+        elif key in self._LIST_PATH_KEYS:
+            paths = self._parse_path_list(value)
+            self._mapping[key] = paths
+            os.environ[self._LIST_PATH_KEYS[key]] = os.pathsep.join(
+                str(p) for p in paths
+            )
+            for p in paths:
+                if not p.exists():
+                    warnings.warn(
+                        f"Path '{p}' does not exist.", UserWarning
+                    )
+
         elif key == 'resolve_paths':
             if not isinstance(value, bool):
                 raise TypeError("'resolve_paths' must be a boolean.")
             self._mapping[key] = value
         else:
-            valid_keys = list(self._PATH_KEYS.keys()) + ['resolve_paths']
+            valid_keys = (
+                list(self._PATH_KEYS.keys())
+                + list(self._LIST_PATH_KEYS.keys())
+                + ['resolve_paths']
+            )
             raise KeyError(
                 f"Unrecognized config key: {key}. Acceptable keys are: "
                 f"{', '.join(repr(k) for k in valid_keys)}."
@@ -140,6 +171,29 @@ class _Config(MutableMapping):
         keys_to_delete = [k for k in self._mapping if k != 'resolve_paths']
         for key in keys_to_delete:
             del self[key]
+
+    def _parse_path_list(self, value) -> List[Path]:
+        """Parse a value into a list of Path objects.
+
+        Accepts a string (split by ``os.pathsep``), a single
+        :class:`~pathlib.Path`, or an iterable of strings/Paths.
+
+        """
+        resolve = self._mapping.get('resolve_paths', True)
+        if isinstance(value, (str, Path)):
+            raw = str(value).split(os.pathsep)
+        else:
+            raw = [str(v) for v in value]
+        paths = []
+        for item in raw:
+            item = item.strip()
+            if not item:
+                continue
+            p = Path(item)
+            if resolve:
+                p = p.resolve(strict=False)
+            paths.append(p)
+        return paths
 
     @contextmanager
     def patch(self, key: str, value: Any):
@@ -193,7 +247,10 @@ def _default_config(**kwargs) -> _Config:
 
     """
     config = _Config(kwargs)
-    for key,var in _Config._PATH_KEYS.items():
+    for key, var in _Config._PATH_KEYS.items():
+        if var in os.environ:
+            config[key] = os.environ[var]
+    for key, var in _Config._LIST_PATH_KEYS.items():
         if var in os.environ:
             config[key] = os.environ[var]
 
