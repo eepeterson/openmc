@@ -2180,3 +2180,411 @@ class Materials(cv.CheckedList):
             }
 
         return all_depleted_materials
+
+
+class MaterialLibrary:
+    """A searchable collection of material composition definitions.
+
+    Material library files use XML with a ``<material_library>`` root
+    element.  Each ``<material>`` child is keyed by its ``name``
+    attribute and carries composition data (nuclides/elements, density,
+    S(a,b) tables) but **no** ``id``.  When a material is retrieved via
+    :meth:`get_material`, a new :class:`Material` is created with an
+    auto-assigned ID.
+
+    The ``<material>`` elements use the same XML representation as
+    :meth:`Material.to_xml_element` (minus the ``id`` attribute).
+    Library files may additionally contain ``<element>`` entries which
+    are expanded to natural isotopes at load time via
+    :meth:`Material.add_element`.
+
+    Parameters
+    ----------
+    paths : str, Path, or iterable of str/Path, optional
+        Directories or files to load on construction.  Directories are
+        scanned for ``*.xml`` files that have a ``<material_library>``
+        root element.  If *None* (default), nothing is loaded
+        automatically — call :meth:`load_file`, :meth:`load_dir`, or
+        :meth:`load_from_path` explicitly.
+
+    Attributes
+    ----------
+    material_names : list of str
+        Names of all materials currently loaded in the library.
+
+    """
+
+    def __init__(self, paths=None):
+        # Mapping from material name -> (lxml Element, source file path)
+        self._index: dict[str, tuple[ET._Element, Path]] = {}
+
+        if paths is not None:
+            if isinstance(paths, (str, Path)):
+                paths = [paths]
+            for p in paths:
+                p = Path(p)
+                if p.is_dir():
+                    self.load_dir(p)
+                else:
+                    self.load_file(p)
+
+    # ------------------------------------------------------------------
+    # Loading methods
+    # ------------------------------------------------------------------
+
+    def load_file(self, path: PathLike) -> None:
+        """Load materials from a single library XML file.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to an XML file with a ``<material_library>`` root.
+
+        Raises
+        ------
+        FileNotFoundError
+            If *path* does not exist.
+        ValueError
+            If the file does not have a ``<material_library>`` root
+            element.
+
+        """
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Material library file not found: '{path}'"
+            )
+
+        tree = ET.parse(str(path))
+        root = tree.getroot()
+
+        if root.tag != 'material_library':
+            raise ValueError(
+                f"Expected <material_library> root element in '{path}', "
+                f"got <{root.tag}>."
+            )
+
+        for mat_elem in root.findall('material'):
+            name = mat_elem.get('name')
+            if name is None:
+                warnings.warn(
+                    f"Skipping <material> without a 'name' attribute in "
+                    f"'{path}'.",
+                    UserWarning,
+                )
+                continue
+
+            if name in self._index:
+                prev_file = self._index[name][1]
+                warnings.warn(
+                    f"Material '{name}' from '{path}' shadows earlier "
+                    f"definition from '{prev_file}'.",
+                    UserWarning,
+                )
+
+            self._index[name] = (mat_elem, path)
+
+    def load_dir(self, directory: PathLike) -> None:
+        """Scan a directory for library XML files and load them.
+
+        All ``*.xml`` files in *directory* whose root element is
+        ``<material_library>`` are loaded.  Files that do not match are
+        silently skipped.  Sub-directories are **not** searched
+        recursively.
+
+        Parameters
+        ----------
+        directory : str or Path
+            Directory to scan.
+
+        Raises
+        ------
+        FileNotFoundError
+            If *directory* does not exist or is not a directory.
+
+        """
+        directory = Path(directory)
+        if not directory.is_dir():
+            raise FileNotFoundError(
+                f"Material library directory not found: '{directory}'"
+            )
+
+        for xml_path in sorted(directory.glob('*.xml')):
+            try:
+                self.load_file(xml_path)
+            except ValueError:
+                # Not a material_library file — skip silently
+                pass
+
+    def load_from_path(self) -> None:
+        """Load libraries from the configured search path.
+
+        The directories listed in
+        ``openmc.config['material_library_path']`` are scanned in order.
+
+        Raises
+        ------
+        KeyError
+            If ``material_library_path`` is not set in
+            ``openmc.config``.
+
+        """
+        paths = openmc.config.get('material_library_path')
+        if paths is None:
+            raise KeyError(
+                "No 'material_library_path' configured.  Set "
+                "openmc.config['material_library_path'] or the "
+                "OPENMC_MATERIAL_LIBRARY_PATH environment variable."
+            )
+        for directory in paths:
+            if Path(directory).is_dir():
+                self.load_dir(directory)
+
+    # ------------------------------------------------------------------
+    # Query methods
+    # ------------------------------------------------------------------
+
+    @property
+    def material_names(self) -> list[str]:
+        """List of all loaded material names."""
+        return list(self._index.keys())
+
+    def __contains__(self, name: str) -> bool:
+        return name in self._index
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    def __repr__(self) -> str:
+        n = len(self._index)
+        names = ', '.join(f"'{k}'" for k in list(self._index)[:5])
+        if n > 5:
+            names += ', ...'
+        return f"MaterialLibrary({n} materials: {names})"
+
+    def list_materials(self) -> dict[str, str]:
+        """Return a mapping of material names to their source file paths.
+
+        Returns
+        -------
+        dict
+            Dictionary mapping each material name to the path of the
+            library file it was loaded from.
+
+        """
+        return {name: str(src) for name, (_, src) in self._index.items()}
+
+    # ------------------------------------------------------------------
+    # Material construction
+    # ------------------------------------------------------------------
+
+    def get_material(
+        self,
+        library_name: str,
+        *,
+        name: str | None = None,
+        material_id: int | None = None,
+        temperature: float | None = None,
+        density: float | None = None,
+        density_units: str | None = None,
+        depletable: bool | None = None,
+    ) -> Material:
+        """Create a new :class:`Material` from a library entry.
+
+        A fresh :class:`Material` is returned with an auto-assigned ID
+        (unless *material_id* is provided).  The composition, density,
+        and S(a,b) tables are copied from the library definition.
+        Keyword arguments can be used to override library values.
+
+        Parameters
+        ----------
+        library_name : str
+            Name of the material as it appears in the library file.
+        name : str, optional
+            Override the name given to the :class:`Material`.  Defaults
+            to *library_name*.
+        material_id : int, optional
+            Explicit material ID.  If *None*, an ID is auto-assigned.
+        temperature : float, optional
+            Override temperature in Kelvin.
+        density : float, optional
+            Override density value.
+        density_units : str, optional
+            Override density units (e.g., ``'g/cm3'``).
+        depletable : bool, optional
+            Override the depletable flag.
+
+        Returns
+        -------
+        Material
+            A new material instance.
+
+        Raises
+        ------
+        KeyError
+            If *library_name* is not found in the library.
+
+        Examples
+        --------
+        >>> lib = openmc.MaterialLibrary()
+        >>> lib.load_file('my_materials.xml')
+        >>> steel = lib.get_material('SS-316')
+        >>> steel_hot = lib.get_material('SS-316', name='Hot Steel',
+        ...                              temperature=600.0)
+
+        """
+        if library_name not in self._index:
+            available = ', '.join(f"'{n}'" for n in self._index)
+            raise KeyError(
+                f"Material '{library_name}' not found in library.  "
+                f"Available materials: {available}"
+            )
+
+        elem, source = self._index[library_name]
+
+        # Use library_name as Material name unless overridden
+        if name is None:
+            name = library_name
+
+        # Parse temperature from library element if not overridden
+        if temperature is None:
+            lib_temp = elem.get('temperature')
+            if lib_temp is not None:
+                temperature = float(lib_temp)
+
+        # Parse depletable from library element if not overridden
+        if depletable is None:
+            lib_dep = elem.get('depletable')
+            if lib_dep is not None:
+                depletable = lib_dep in ('true', '1')
+
+        mat = Material(
+            material_id=material_id,
+            name=name,
+            temperature=temperature,
+            depletable=depletable,
+        )
+
+        # --- Add nuclides ---
+        for nuclide in elem.findall('nuclide'):
+            nuc_name = get_text(nuclide, 'name')
+            if 'ao' in nuclide.attrib:
+                mat.add_nuclide(nuc_name, float(nuclide.attrib['ao']))
+            elif 'wo' in nuclide.attrib:
+                mat.add_nuclide(nuc_name, float(nuclide.attrib['wo']), 'wo')
+
+        # --- Add elements (expanded to natural isotopes at load time) ---
+        for element in elem.findall('element'):
+            elem_name = get_text(element, 'name')
+            if 'ao' in element.attrib:
+                mat.add_element(elem_name, float(element.attrib['ao']))
+            elif 'wo' in element.attrib:
+                mat.add_element(elem_name, float(element.attrib['wo']), 'wo')
+
+        # --- Set density ---
+        if density is not None:
+            units = density_units or 'g/cm3'
+            mat.set_density(units, density)
+        elif density_units is not None:
+            # Units override without value — read value from library
+            density_elem = elem.find('density')
+            if density_elem is not None:
+                value = get_text(density_elem, 'value')
+                if value is not None:
+                    mat.set_density(density_units, float(value))
+                else:
+                    mat.set_density(density_units)
+        else:
+            density_elem = elem.find('density')
+            if density_elem is not None:
+                units = get_text(density_elem, 'units')
+                if units == 'sum':
+                    mat.set_density(units)
+                else:
+                    value = float(get_text(density_elem, 'value'))
+                    mat.set_density(units, value)
+
+        # --- Add S(a,b) tables ---
+        for sab in elem.findall('sab'):
+            fraction = float(get_text(sab, 'fraction', 1.0))
+            sab_name = get_text(sab, 'name')
+            mat.add_s_alpha_beta(sab_name, fraction)
+
+        # --- Check for isotropic scattering nuclides ---
+        isotropic = get_elem_list(elem, "isotropic", str)
+        if isotropic is not None:
+            mat.isotropic = isotropic
+
+        return mat
+
+    # ------------------------------------------------------------------
+    # Library creation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def create_library(
+        materials: list[Material],
+        path: PathLike,
+        library_name: str = 'Custom Library',
+        description: str = '',
+    ) -> None:
+        """Write materials to a library XML file.
+
+        Material IDs are **not** written; only names and compositions
+        are stored.  The ``<material>`` elements use the same XML
+        representation as :meth:`Material.to_xml_element`.
+
+        Parameters
+        ----------
+        materials : list of Material
+            Materials to write.  Each must have a non-empty
+            :attr:`~Material.name`.
+        path : str or Path
+            Output file path.
+        library_name : str
+            Library name recorded in the root element.
+        description : str
+            Optional description recorded as a child element.
+
+        Raises
+        ------
+        ValueError
+            If any material has an empty name or if duplicate names
+            exist.
+
+        """
+        path = Path(path)
+
+        # Validate names
+        names: list[str] = []
+        for mat in materials:
+            if not mat.name:
+                raise ValueError(
+                    f"Material id={mat.id} has no name.  All materials "
+                    "in a library must have a non-empty name."
+                )
+            if mat.name in names:
+                raise ValueError(
+                    f"Duplicate material name '{mat.name}'.  Names must "
+                    "be unique within a library file."
+                )
+            names.append(mat.name)
+
+        root = ET.Element('material_library')
+        root.set('name', library_name)
+
+        if description:
+            desc_elem = ET.SubElement(root, 'description')
+            desc_elem.text = description
+
+        for mat in materials:
+            # Reuse the existing to_xml_element() and strip the id
+            mat_elem = mat.to_xml_element()
+            if 'id' in mat_elem.attrib:
+                del mat_elem.attrib['id']
+            root.append(mat_elem)
+
+        tree = ET.ElementTree(root)
+        ET.indent(tree, space='  ')
+        tree.write(str(path), xml_declaration=True, encoding='utf-8',
+                   pretty_print=True)
