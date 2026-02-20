@@ -624,6 +624,100 @@ def sample_external_source(
     return openmc.ParticleList(particles)
 
 
+# HDF5 compound dtype used by ParticleList.export_to_hdf5 / FileSource.
+# This is the first 84 bytes of _source_site_dtype (dropping parent_nuclide,
+# parent_id, progeny_id) with r/u stored as named (x,y,z) sub-fields.
+_pos_dtype = np.dtype([('x', '<f8'), ('y', '<f8'), ('z', '<f8')])
+_hdf5_source_dtype = np.dtype([
+    ('r', _pos_dtype),
+    ('u', _pos_dtype),
+    ('E', '<f8'),
+    ('time', '<f8'),
+    ('wgt', '<f8'),
+    ('delayed_group', '<i4'),
+    ('surf_id', '<i4'),
+    ('particle', '<i4'),
+])
+
+
+def sample_external_source_to_file(
+        filename: PathLike,
+        n_samples: int,
+        prn_seed: int | None = None,
+        n_threads: int = 1,
+) -> None:
+    """Sample external source and stream results directly to an HDF5 file.
+
+    This function samples source particles in batches and writes each batch
+    directly to disk, so memory usage stays bounded regardless of the total
+    number of samples.  The resulting file is compatible with
+    :class:`openmc.FileSource`.
+
+    .. versionadded:: 0.15.2
+
+    Parameters
+    ----------
+    filename : path-like
+        Path to the HDF5 source file to create.
+    n_samples : int
+        Total number of source particles to sample.
+    prn_seed : int or None
+        Pseudorandom number generator seed.  If None, one is generated
+        randomly.
+    n_threads : int
+        Number of OpenMP threads for parallel sampling.
+
+    """
+    import h5py
+    from openmc.statepoint import _VERSION_STATEPOINT
+
+    if n_samples <= 0:
+        raise ValueError("Number of samples must be positive")
+    if n_threads < 1:
+        raise ValueError("Number of threads must be at least 1")
+    if prn_seed is None:
+        prn_seed = getrandbits(63)
+
+    batch_size = min(n_samples, _SOURCE_SAMPLE_BATCH_SIZE)
+
+    with h5py.File(filename, 'w') as fh:
+        fh.attrs['filetype'] = np.bytes_("source")
+        fh.attrs['version'] = np.array([_VERSION_STATEPOINT, 2])
+
+        # Pre-allocate dataset at full size with chunking for efficient
+        # sequential writes.
+        chunk_size = min(batch_size, n_samples)
+        ds = fh.create_dataset(
+            'source_bank',
+            shape=(n_samples,),
+            dtype=_hdf5_source_dtype,
+            chunks=(chunk_size,),
+        )
+
+        for offset in range(0, n_samples, batch_size):
+            n_batch = min(batch_size, n_samples - offset)
+
+            sites_array = _get_source_site_buffer(n_batch)
+
+            _dll.openmc_sample_external_source(
+                c_size_t(n_batch),
+                c_uint64(prn_seed + offset),
+                sites_array,
+                c_int(n_threads),
+            )
+
+            # Zero-copy strided view: reinterpret the first 84 bytes of
+            # each 104-byte SourceSite record as the HDF5 compound dtype.
+            batch_arr = np.ndarray(
+                (n_batch,),
+                dtype=_hdf5_source_dtype,
+                buffer=sites_array,
+                strides=(_source_site_dtype.itemsize,),
+            )
+
+            ds[offset:offset + n_batch] = batch_arr
+
+
 def simulation_init():
     """Initialize simulation"""
     _dll.openmc_simulation_init()
