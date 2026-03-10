@@ -391,6 +391,11 @@ public:
 
   double integral() const override { return integral_; }
 
+  //! Evaluate probability density, f(x), at a point
+  //! \param x Point to evaluate f(x)
+  //! \return f(x)
+  double evaluate(double x) const override;
+
   //! Override set_bias as no-op (bias handled in constructor)
   void set_bias(std::unique_ptr<Distribution> bias) override {}
 
@@ -402,6 +407,7 @@ protected:
 
 private:
   vector<UPtrDist> distribution_; //!< Sub-distributions
+  vector<double> prob_; //!< Normalized mixture probabilities for each component
   vector<double> weight_; //!< Importance weights for component selection
   DiscreteIndex di_;      //!< Discrete probability distribution of indices
   double integral_;       //!< Integral of distribution

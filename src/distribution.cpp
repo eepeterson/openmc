@@ -685,7 +685,12 @@ Mixture::Mixture(pugi::xml_node node)
   // Save sum of weighted probabilities
   integral_ = std::accumulate(probabilities.begin(), probabilities.end(), 0.0);
 
+  // Store normalized mixture probabilities for evaluate()
   std::size_t n = probabilities.size();
+  prob_.resize(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    prob_[i] = probabilities[i] / integral_;
+  }
 
   // Check for bias
   if (check_for_node(node, "bias")) {
@@ -726,6 +731,16 @@ double Mixture::sample_unbiased(uint64_t* seed) const
 {
   size_t idx = di_.sample(seed);
   return distribution_[idx]->sample(seed).first;
+}
+
+double Mixture::evaluate(double x) const
+{
+  // Mixture PDF is the probability-weighted sum of component PDFs
+  double result = 0.0;
+  for (std::size_t i = 0; i < distribution_.size(); ++i) {
+    result += prob_[i] * distribution_[i]->evaluate(x);
+  }
+  return result;
 }
 
 //==============================================================================
