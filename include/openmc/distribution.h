@@ -4,7 +4,9 @@
 #ifndef OPENMC_DISTRIBUTION_H
 #define OPENMC_DISTRIBUTION_H
 
-#include <cstddef> // for size_t
+#include <cstddef>    // for size_t
+#include <functional> // for function
+#include <mutex>      // for once_flag
 
 #include "pugixml.hpp"
 
@@ -14,6 +16,50 @@
 #include "openmc/vector.h" // for vector
 
 namespace openmc {
+
+//==============================================================================
+//! Precomputed quantile lookup table for distributions without analytic
+//! inverse CDFs. Stores paired (cdf_value, x_value) arrays and provides
+//! O(log N) quantile lookup via binary search and linear interpolation.
+//==============================================================================
+
+struct QuantileTable {
+  vector<double> c; //!< CDF values, monotonically increasing from 0 to 1
+  vector<double> x; //!< Corresponding x values
+
+  //! Look up quantile by binary search and linear interpolation
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) ≈ u
+  double operator()(double u) const;
+
+  //! Check whether the table has been built
+  bool empty() const { return c.empty(); }
+};
+
+//! Build a quantile table by adaptively integrating a PDF.
+//! Uses trapezoidal integration on an adaptively refined x-grid, then
+//! stores the resulting (CDF, x) pairs as a QuantileTable.
+//!
+//! \param eval_pdf Callable that evaluates the PDF at a given x
+//! \param x_lo Lower bound of the domain
+//! \param x_hi Upper bound of the domain
+//! \param n_initial Number of initial grid points (default: 1000)
+//! \param tol Relative quantile tolerance for adaptive refinement
+//! \return Populated QuantileTable
+QuantileTable build_quantile_table(
+  const std::function<double(double)>& eval_pdf, double x_lo, double x_hi,
+  int n_initial = 1000, double tol = 1e-3);
+
+//! Find the effective upper bound of a distribution's support by marching
+//! rightward from the mode until the PDF drops below a fraction of the peak.
+//!
+//! \param eval_pdf Callable that evaluates the PDF at a given x
+//! \param x_start Starting point for search (e.g., 0 or mode estimate)
+//! \param x_initial Initial guess for upper bound
+//! \param fraction PDF fraction of peak below which to truncate (default: 1e-12)
+//! \return Effective upper bound
+double find_upper_bound(const std::function<double(double)>& eval_pdf,
+  double x_start, double x_initial, double fraction = 1e-12);
 
 //==============================================================================
 // Helper function for computing importance weights from biased sampling
@@ -48,6 +94,11 @@ public:
   //! \param x Point to evaluate F(x)
   //! \return F(x)
   virtual double cdf(double x) const;
+
+  //! Evaluate the quantile function (inverse CDF), Q(u) = F^{-1}(u)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  virtual double quantile(double u) const;
 
   //! Return integral of distribution
   //! \return Integral of distribution
@@ -138,6 +189,11 @@ public:
   //! \return F(x)
   double cdf(double x) const override;
 
+  //! Evaluate the quantile function (inverse CDF)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  double quantile(double u) const override;
+
   //! Override set_bias as no-op (bias handled in constructor)
   void set_bias(std::unique_ptr<Distribution> bias) override {}
 
@@ -179,6 +235,11 @@ public:
   //! \return F(x)
   double cdf(double x) const override;
 
+  //! Evaluate the quantile function (inverse CDF)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  double quantile(double u) const override;
+
   double a() const { return a_; }
   double b() const { return b_; }
 
@@ -213,6 +274,11 @@ public:
   //! \param x Point to evaluate F(x)
   //! \return F(x)
   double cdf(double x) const override;
+
+  //! Evaluate the quantile function (inverse CDF)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  double quantile(double u) const override;
 
   double a() const { return std::pow(offset_, ninv_); }
   double b() const { return std::pow(offset_ + span_, ninv_); }
@@ -250,6 +316,11 @@ public:
   //! \return F(x)
   double cdf(double x) const override;
 
+  //! Evaluate the quantile function (inverse CDF)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  double quantile(double u) const override;
+
   double theta() const { return theta_; }
 
 protected:
@@ -260,6 +331,11 @@ protected:
 
 private:
   double theta_; //!< Factor in exponential [eV]
+  mutable QuantileTable quantile_table_; //!< Lazy-built quantile cache
+  mutable std::once_flag quantile_init_; //!< Ensures one-time initialization
+
+  //! Build the quantile lookup table (called once on first use)
+  void build_quantile_table() const;
 };
 
 //==============================================================================
@@ -281,6 +357,11 @@ public:
   //! \return F(x)
   double cdf(double x) const override;
 
+  //! Evaluate the quantile function (inverse CDF)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  double quantile(double u) const override;
+
   double a() const { return a_; }
   double b() const { return b_; }
 
@@ -293,6 +374,11 @@ protected:
 private:
   double a_; //!< Factor in exponential [eV]
   double b_; //!< Factor in square root [1/eV]
+  mutable QuantileTable quantile_table_; //!< Lazy-built quantile cache
+  mutable std::once_flag quantile_init_; //!< Ensures one-time initialization
+
+  //! Build the quantile lookup table (called once on first use)
+  void build_quantile_table() const;
 };
 
 //==============================================================================
@@ -318,6 +404,11 @@ public:
   //! \param x Point to evaluate F(x)
   //! \return F(x), accounting for truncation normalization
   double cdf(double x) const override;
+
+  //! Evaluate the quantile function (inverse CDF)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  double quantile(double u) const override;
 
   double mean_value() const { return mean_value_; }
   double std_dev() const { return std_dev_; }
@@ -362,6 +453,11 @@ public:
   //! \param x Point to evaluate F(x)
   //! \return F(x)
   double cdf(double x) const override;
+
+  //! Evaluate the quantile function (inverse CDF)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  double quantile(double u) const override;
 
   // properties
   vector<double>& x() { return x_; }
@@ -410,6 +506,11 @@ public:
   //! \return F(x)
   double cdf(double x) const override;
 
+  //! Evaluate the quantile function (inverse CDF)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  double quantile(double u) const override;
+
   const vector<double>& x() const { return x_; }
 
 protected:
@@ -447,6 +548,11 @@ public:
   //! \return F(x)
   double cdf(double x) const override;
 
+  //! Evaluate the quantile function (inverse CDF)
+  //! \param u Probability value in [0,1]
+  //! \return x such that F(x) = u
+  double quantile(double u) const override;
+
   //! Override set_bias as no-op (bias handled in constructor)
   void set_bias(std::unique_ptr<Distribution> bias) override {}
 
@@ -462,6 +568,11 @@ private:
   vector<double> weight_; //!< Importance weights for component selection
   DiscreteIndex di_;      //!< Discrete probability distribution of indices
   double integral_;       //!< Integral of distribution
+  mutable QuantileTable quantile_table_; //!< Lazy-built quantile cache
+  mutable std::once_flag quantile_init_; //!< Ensures one-time initialization
+
+  //! Build the quantile lookup table (called once on first use)
+  void build_quantile_table() const;
 };
 
 } // namespace openmc

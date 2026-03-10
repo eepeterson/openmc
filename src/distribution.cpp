@@ -18,6 +18,165 @@
 namespace openmc {
 
 //==============================================================================
+// QuantileTable implementation
+//==============================================================================
+
+double QuantileTable::operator()(double u) const
+{
+  // Clamp to [0, 1]
+  u = std::max(0.0, std::min(1.0, u));
+
+  // Binary search for the interval containing u
+  auto it = std::lower_bound(c.begin(), c.end(), u);
+  int i = static_cast<int>(it - c.begin()) - 1;
+  i = std::max(0, std::min(i, static_cast<int>(c.size()) - 2));
+
+  // Linear interpolation
+  double dc = c[i + 1] - c[i];
+  if (dc <= 0.0)
+    return x[i];
+  double frac = (u - c[i]) / dc;
+  return x[i] + frac * (x[i + 1] - x[i]);
+}
+
+double find_upper_bound(const std::function<double(double)>& eval_pdf,
+  double x_start, double x_initial, double fraction)
+{
+  // Find peak value in the initial region
+  constexpr int n_search = 50;
+  double dx = (x_initial - x_start) / n_search;
+  double f_peak = 0.0;
+  for (int i = 0; i <= n_search; ++i) {
+    double xi = x_start + i * dx;
+    f_peak = std::max(f_peak, eval_pdf(xi));
+  }
+
+  if (f_peak == 0.0)
+    return x_initial;
+
+  double threshold = f_peak * fraction;
+
+  // March rightward, doubling step size, until PDF < threshold
+  double x_hi = x_initial;
+  double step = x_initial - x_start;
+  if (step <= 0.0)
+    step = 1.0;
+
+  for (int iter = 0; iter < 100; ++iter) {
+    if (eval_pdf(x_hi) < threshold)
+      return x_hi;
+    step *= 2.0;
+    x_hi += step;
+  }
+  return x_hi;
+}
+
+QuantileTable build_quantile_table(
+  const std::function<double(double)>& eval_pdf, double x_lo, double x_hi,
+  int n_initial, double tol)
+{
+  // Build uniform initial grid
+  vector<double> xg(n_initial);
+  for (int i = 0; i < n_initial; ++i) {
+    xg[i] = x_lo + (x_hi - x_lo) * i / (n_initial - 1);
+  }
+
+  // Evaluate PDF on the grid
+  vector<double> fg(n_initial);
+  for (int i = 0; i < n_initial; ++i) {
+    fg[i] = eval_pdf(xg[i]);
+  }
+
+  // Trapezoidal integration to build CDF
+  vector<double> cg(n_initial);
+  cg[0] = 0.0;
+  for (int i = 1; i < n_initial; ++i) {
+    cg[i] = cg[i - 1] + 0.5 * (fg[i - 1] + fg[i]) * (xg[i] - xg[i - 1]);
+  }
+
+  // Normalize CDF to [0, 1]
+  double total = cg[n_initial - 1];
+  if (total > 0.0) {
+    for (int i = 0; i < n_initial; ++i) {
+      cg[i] /= total;
+    }
+  }
+  cg[n_initial - 1] = 1.0; // ensure exact 1.0 at end
+
+  // Adaptive refinement: check midpoints for quantile accuracy
+  // and insert new points where the linearly-interpolated quantile
+  // differs from the true quantile by more than tol * (x_hi - x_lo)
+  double abs_tol = tol * (x_hi - x_lo);
+  constexpr int max_refinements = 3;
+  constexpr int max_points = 10000;
+
+  for (int round = 0; round < max_refinements; ++round) {
+    vector<double> new_xg, new_fg, new_cg;
+    new_xg.push_back(xg[0]);
+    new_fg.push_back(fg[0]);
+    new_cg.push_back(cg[0]);
+
+    bool refined = false;
+    for (std::size_t i = 0; i < xg.size() - 1; ++i) {
+      double x_mid = 0.5 * (xg[i] + xg[i + 1]);
+      double f_mid = eval_pdf(x_mid);
+
+      // True CDF at midpoint (trapezoidal from left endpoint)
+      double c_mid_true =
+        cg[i] + 0.5 * (fg[i] + f_mid) * (x_mid - xg[i]) / total;
+
+      // Linearly interpolated CDF at midpoint
+      double c_mid_interp = 0.5 * (cg[i] + cg[i + 1]);
+
+      // Estimate quantile error: if the CDF error is dc, and PDF at midpoint
+      // is f, then quantile error ≈ dc / (f/total). But simpler: if the x
+      // values where c_mid_true and c_mid_interp map back differ by more
+      // than tol, refine.
+      double dc = std::fabs(c_mid_true - c_mid_interp);
+      double x_error = (f_mid > 0.0) ? dc * total / f_mid : 0.0;
+
+      if (x_error > abs_tol &&
+          static_cast<int>(new_xg.size() + (xg.size() - i)) < max_points) {
+        // Insert midpoint
+        new_xg.push_back(x_mid);
+        new_fg.push_back(f_mid);
+        new_cg.push_back(0.0); // will recompute
+        refined = true;
+      }
+
+      new_xg.push_back(xg[i + 1]);
+      new_fg.push_back(fg[i + 1]);
+      new_cg.push_back(0.0); // will recompute
+    }
+
+    if (!refined)
+      break;
+
+    // Recompute CDF for the refined grid
+    xg = std::move(new_xg);
+    fg = std::move(new_fg);
+    cg.resize(xg.size());
+    cg[0] = 0.0;
+    for (std::size_t i = 1; i < xg.size(); ++i) {
+      cg[i] = cg[i - 1] + 0.5 * (fg[i - 1] + fg[i]) * (xg[i] - xg[i - 1]);
+    }
+    total = cg.back();
+    if (total > 0.0) {
+      for (std::size_t i = 0; i < xg.size(); ++i) {
+        cg[i] /= total;
+      }
+    }
+    cg.back() = 1.0;
+  }
+
+  // Build the QuantileTable (CDF -> x)
+  QuantileTable qt;
+  qt.c = std::move(cg);
+  qt.x = std::move(xg);
+  return qt;
+}
+
+//==============================================================================
 // Helper function for computing importance weights from biased sampling
 //==============================================================================
 
@@ -74,6 +233,13 @@ double Distribution::cdf(double x) const
 {
   throw std::runtime_error(
     "CDF evaluation not implemented for this distribution type.");
+}
+
+// Quantile evaluation not supported for all distribution types
+double Distribution::quantile(double u) const
+{
+  throw std::runtime_error(
+    "Quantile evaluation not implemented for this distribution type.");
 }
 
 void Distribution::read_bias_from_xml(pugi::xml_node node)
@@ -269,6 +435,19 @@ double Discrete::cdf(double x) const
   return cum;
 }
 
+double Discrete::quantile(double u) const
+{
+  // Invert the step-function CDF: find smallest x such that F(x) >= u
+  u = std::max(0.0, std::min(1.0, u));
+  double cum = 0.0;
+  for (std::size_t i = 0; i < x_.size(); ++i) {
+    cum += p_[i];
+    if (cum >= u)
+      return x_[i];
+  }
+  return x_.back();
+}
+
 //==============================================================================
 // Uniform implementation
 //==============================================================================
@@ -312,6 +491,13 @@ double Uniform::cdf(double x) const
   } else {
     return (x - a()) / (b() - a());
   }
+}
+
+double Uniform::quantile(double u) const
+{
+  // Q(u) = a + u*(b - a)
+  u = std::max(0.0, std::min(1.0, u));
+  return a_ + u * (b_ - a_);
 }
 
 //==============================================================================
@@ -362,6 +548,13 @@ double PowerLaw::cdf(double x) const
   }
 }
 
+double PowerLaw::quantile(double u) const
+{
+  // Q(u) = (a^(n+1) + u * (b^(n+1) - a^(n+1)))^(1/(n+1))
+  u = std::max(0.0, std::min(1.0, u));
+  return std::pow(offset_ + u * span_, ninv_);
+}
+
 double PowerLaw::sample_unbiased(uint64_t* seed) const
 {
   return std::pow(offset_ + prn(seed) * span_, ninv_);
@@ -398,6 +591,20 @@ double Maxwell::cdf(double x) const
     return 0.0;
   double t = std::sqrt(x / theta_);
   return std::erf(t) - (2.0 / SQRT_PI) * t * std::exp(-t * t);
+}
+
+double Maxwell::quantile(double u) const
+{
+  // Use lazy-built quantile table
+  std::call_once(quantile_init_, [this]() { build_quantile_table(); });
+  return quantile_table_(u);
+}
+
+void Maxwell::build_quantile_table() const
+{
+  auto pdf = [this](double x) { return this->evaluate(x); };
+  double x_hi = find_upper_bound(pdf, 0.0, 10.0 * theta_, 1e-14);
+  quantile_table_ = openmc::build_quantile_table(pdf, 0.0, x_hi);
 }
 
 //==============================================================================
@@ -448,6 +655,20 @@ double Watt::cdf(double x) const
     f_prev = f_curr;
   }
   return std::min(sum, 1.0);
+}
+
+double Watt::quantile(double u) const
+{
+  // Use lazy-built quantile table
+  std::call_once(quantile_init_, [this]() { build_quantile_table(); });
+  return quantile_table_(u);
+}
+
+void Watt::build_quantile_table() const
+{
+  auto pdf = [this](double x) { return this->evaluate(x); };
+  double x_hi = find_upper_bound(pdf, 0.0, 10.0 * a_, 1e-14);
+  quantile_table_ = openmc::build_quantile_table(pdf, 0.0, x_hi);
 }
 
 //==============================================================================
@@ -563,6 +784,27 @@ double Normal::cdf(double x) const
   double F_alpha = standard_normal_cdf(alpha);
   double F_beta = standard_normal_cdf(beta);
   return (F - F_alpha) / (F_beta - F_alpha);
+}
+
+double Normal::quantile(double u) const
+{
+  u = std::max(0.0, std::min(1.0, u));
+
+  if (!is_truncated_) {
+    // Q(u) = mu + sigma * Phi^{-1}(u)
+    return mean_value_ + std_dev_ * normal_percentile(u);
+  }
+
+  // For truncated normal:
+  // Q(u) = mu + sigma * Phi^{-1}(Phi(alpha) + u * (Phi(beta) - Phi(alpha)))
+  double alpha = (lower_ - mean_value_) / std_dev_;
+  double beta = (upper_ - mean_value_) / std_dev_;
+  double F_alpha = standard_normal_cdf(alpha);
+  double F_beta = standard_normal_cdf(beta);
+  double p = F_alpha + u * (F_beta - F_alpha);
+  // Clamp to avoid numerical issues at boundaries
+  p = std::max(1e-16, std::min(1.0 - 1e-16, p));
+  return mean_value_ + std_dev_ * normal_percentile(p);
 }
 
 //==============================================================================
@@ -777,6 +1019,60 @@ double Tabular::cdf(double x) const
   }
 }
 
+double Tabular::quantile(double u) const
+{
+  // This is the same algorithm as sample_unbiased(), but takes a CDF value
+  // directly instead of drawing one from prn(seed). This IS the inverse CDF.
+  u = std::max(0.0, std::min(1.0, u));
+
+  // Find first CDF bin which is above the sampled value
+  double c_i = c_[0];
+  int i;
+  std::size_t n = c_.size();
+  for (i = 0; i < static_cast<int>(n) - 1; ++i) {
+    if (u <= c_[i + 1])
+      break;
+    c_i = c_[i + 1];
+  }
+
+  // Determine bounding values
+  double x_i = x_[i];
+  double p_i = p_[i];
+
+  if (interp_ == Interpolation::histogram) {
+    if (p_i > 0.0) {
+      return x_i + (u - c_i) / p_i;
+    } else {
+      return x_i;
+    }
+  } else if (interp_ == Interpolation::lin_lin) {
+    double x_i1 = x_[i + 1];
+    double p_i1 = p_[i + 1];
+    double m = (p_i1 - p_i) / (x_i1 - x_i);
+    if (m == 0.0) {
+      return x_i + (u - c_i) / p_i;
+    } else {
+      return x_i +
+             (std::sqrt(std::max(0.0, p_i * p_i + 2 * m * (u - c_i))) - p_i) /
+               m;
+    }
+  } else if (interp_ == Interpolation::log_lin) {
+    double x_i1 = x_[i + 1];
+    double p_i1 = p_[i + 1];
+    double m = std::log(p_i1 / p_i) / (x_i1 - x_i);
+    double f = (u - c_i) / p_i;
+    return x_i + f * log1prel(m * f);
+  } else if (interp_ == Interpolation::log_log) {
+    double x_i1 = x_[i + 1];
+    double p_i1 = p_[i + 1];
+    double m = std::log((x_i1 * p_i1) / (x_i * p_i)) / std::log(x_i1 / x_i);
+    double f = (u - c_i) / (p_i * x_i);
+    return x_i * std::exp(f * log1prel(m * f));
+  } else {
+    UNREACHABLE();
+  }
+}
+
 //==============================================================================
 // Equiprobable implementation
 //==============================================================================
@@ -826,6 +1122,19 @@ double Equiprobable::cdf(double x) const
     }
   }
   return 1.0;
+}
+
+double Equiprobable::quantile(double u) const
+{
+  // Equiprobable: each of (n-1) bins has probability 1/(n-1).
+  // Same logic as sample_unbiased but with explicit u instead of prn(seed).
+  u = std::max(0.0, std::min(1.0, u));
+  std::size_t n = x_.size();
+  int i = static_cast<int>(std::floor((n - 1) * u));
+  i = std::min(i, static_cast<int>(n) - 2);
+  double xl = x_[i];
+  double xr = x_[i + 1];
+  return xl + ((n - 1) * u - i) * (xr - xl);
 }
 
 //==============================================================================
@@ -923,6 +1232,48 @@ double Mixture::cdf(double x) const
     result += prob_[i] * distribution_[i]->cdf(x);
   }
   return result;
+}
+
+double Mixture::quantile(double u) const
+{
+  // Use lazy-built quantile table (must invert the full mixture CDF,
+  // NOT sum component quantiles)
+  std::call_once(quantile_init_, [this]() { build_quantile_table(); });
+  return quantile_table_(u);
+}
+
+void Mixture::build_quantile_table() const
+{
+  auto pdf = [this](double x) { return this->evaluate(x); };
+
+  // Determine the effective domain from all components.
+  // Use CDF to find bounds where mixture CDF ≈ 0 and ≈ 1.
+  // Start by finding the range where PDF is non-negligible.
+  double x_lo = 0.0;
+  double x_hi = find_upper_bound(pdf, 0.0, 1.0, 1e-14);
+
+  // Also search for negative support (e.g., Normal components)
+  // March leftward from 0 to find where PDF becomes negligible
+  double f_peak = 0.0;
+  for (int i = 0; i <= 50; ++i) {
+    double xi = x_lo + (x_hi - x_lo) * i / 50.0;
+    f_peak = std::max(f_peak, pdf(xi));
+  }
+  if (f_peak > 0.0) {
+    double threshold = f_peak * 1e-14;
+    double step = std::max(1.0, x_hi - x_lo);
+    double x_test = 0.0;
+    for (int iter = 0; iter < 50; ++iter) {
+      x_test -= step;
+      if (pdf(x_test) < threshold) {
+        x_lo = x_test;
+        break;
+      }
+      step *= 2.0;
+    }
+  }
+
+  quantile_table_ = openmc::build_quantile_table(pdf, x_lo, x_hi);
 }
 
 //==============================================================================
