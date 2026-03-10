@@ -133,6 +133,24 @@ using UPtrDist = unique_ptr<Distribution>;
 //! \return Unique pointer to distribution
 UPtrDist distribution_from_xml(pugi::xml_node node);
 
+//! Sample from the quantile interpolation of two distributions.
+//!
+//! Draws a single u ~ Uniform(0,1) and returns
+//!   (1 - t) * dist1.quantile(u) + t * dist2.quantile(u)
+//!
+//! This preserves the correlation structure (same quantile level for both
+//! distributions) and produces a smooth interpolation between the two
+//! distributions in quantile space. This is distinct from mixture
+//! interpolation which would sample from one distribution or the other.
+//!
+//! \param dist1 First endpoint distribution
+//! \param dist2 Second endpoint distribution
+//! \param t Interpolation factor in [0,1]; t=0 gives dist1, t=1 gives dist2
+//! \param seed Pseudorandom number seed pointer
+//! \return Sampled value from the interpolated distribution
+double sample_quantile_interp(const Distribution& dist1,
+  const Distribution& dist2, double t, uint64_t* seed);
+
 //==============================================================================
 //! A discrete distribution index (probability mass function)
 //==============================================================================

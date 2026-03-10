@@ -1277,6 +1277,24 @@ void Mixture::build_quantile_table() const
 }
 
 //==============================================================================
+// Quantile interpolation
+//==============================================================================
+
+double sample_quantile_interp(const Distribution& dist1,
+  const Distribution& dist2, double t, uint64_t* seed)
+{
+  // Draw a single uniform random number
+  double u = prn(seed);
+
+  // Evaluate both quantile functions at the same u
+  double q1 = dist1.quantile(u);
+  double q2 = dist2.quantile(u);
+
+  // Linear interpolation in quantile space
+  return (1.0 - t) * q1 + t * q2;
+}
+
+//==============================================================================
 // Helper function
 //==============================================================================
 
