@@ -69,6 +69,13 @@ double Distribution::evaluate(double x) const
     "PDF evaluation not implemented for this distribution type.");
 }
 
+// CDF evaluation not supported for all distribution types
+double Distribution::cdf(double x) const
+{
+  throw std::runtime_error(
+    "CDF evaluation not implemented for this distribution type.");
+}
+
 void Distribution::read_bias_from_xml(pugi::xml_node node)
 {
   if (check_for_node(node, "bias")) {
@@ -192,6 +199,14 @@ Discrete::Discrete(pugi::xml_node node)
   x_.assign(params.begin(), params.begin() + n);
   const double* p = params.data() + n;
 
+  // Store normalized probabilities for cdf()
+  double total = 0.0;
+  for (std::size_t i = 0; i < n; ++i)
+    total += p[i];
+  p_.resize(n);
+  for (std::size_t i = 0; i < n; ++i)
+    p_[i] = p[i] / total;
+
   // Check for bias
   if (check_for_node(node, "bias")) {
     // Get bias probabilities
@@ -219,6 +234,14 @@ Discrete::Discrete(pugi::xml_node node)
 Discrete::Discrete(const double* x, const double* p, size_t n) : di_({p, n})
 {
   x_.assign(x, x + n);
+
+  // Store normalized probabilities for cdf()
+  double total = 0.0;
+  for (std::size_t i = 0; i < n; ++i)
+    total += p[i];
+  p_.resize(n);
+  for (std::size_t i = 0; i < n; ++i)
+    p_[i] = p[i] / total;
 }
 
 std::pair<double, double> Discrete::sample(uint64_t* seed) const
@@ -232,6 +255,18 @@ double Discrete::sample_unbiased(uint64_t* seed) const
 {
   size_t idx = di_.sample(seed);
   return x_[idx];
+}
+
+double Discrete::cdf(double x) const
+{
+  // Step-function CDF: sum probabilities for all outcomes <= x
+  double cum = 0.0;
+  for (std::size_t i = 0; i < x_.size(); ++i) {
+    if (x_[i] > x)
+      break;
+    cum += p_[i];
+  }
+  return cum;
 }
 
 //==============================================================================
@@ -265,6 +300,17 @@ double Uniform::evaluate(double x) const
     return 0.0;
   } else {
     return 1 / (b() - a());
+  }
+}
+
+double Uniform::cdf(double x) const
+{
+  if (x <= a()) {
+    return 0.0;
+  } else if (x >= b()) {
+    return 1.0;
+  } else {
+    return (x - a()) / (b() - a());
   }
 }
 
@@ -304,6 +350,18 @@ double PowerLaw::evaluate(double x) const
   }
 }
 
+double PowerLaw::cdf(double x) const
+{
+  if (x <= a()) {
+    return 0.0;
+  } else if (x >= b()) {
+    return 1.0;
+  } else {
+    // CDF is (x^(n+1) - a^(n+1)) / (b^(n+1) - a^(n+1))
+    return (std::pow(x, n() + 1) - offset_) / span_;
+  }
+}
+
 double PowerLaw::sample_unbiased(uint64_t* seed) const
 {
   return std::pow(offset_ + prn(seed) * span_, ninv_);
@@ -329,6 +387,17 @@ double Maxwell::evaluate(double x) const
 {
   double c = (2.0 / SQRT_PI) * std::pow(theta_, -1.5);
   return c * std::sqrt(x) * std::exp(-x / theta_);
+}
+
+double Maxwell::cdf(double x) const
+{
+  // Maxwell CDF using the regularized lower incomplete gamma function:
+  // F(x) = gamma(3/2, x/theta) / Gamma(3/2)
+  // which equals erf(sqrt(x/theta)) - 2*sqrt(x/(pi*theta)) * exp(-x/theta)
+  if (x <= 0.0)
+    return 0.0;
+  double t = std::sqrt(x / theta_);
+  return std::erf(t) - (2.0 / SQRT_PI) * t * std::exp(-t * t);
 }
 
 //==============================================================================
@@ -358,6 +427,27 @@ double Watt::evaluate(double x) const
   double c =
     2.0 / (std::sqrt(PI * b_) * std::pow(a_, 1.5) * std::exp(a_ * b_ / 4.0));
   return c * std::exp(-x / a_) * std::sinh(std::sqrt(b_ * x));
+}
+
+double Watt::cdf(double x) const
+{
+  // Numerical integration of the Watt PDF using the trapezoidal rule.
+  // The Watt spectrum has no closed-form CDF.
+  if (x <= 0.0)
+    return 0.0;
+
+  // Use 500 trapezoid panels for accuracy
+  constexpr int n_panels = 500;
+  double dx = x / n_panels;
+  double sum = 0.0;
+  double f_prev = evaluate(0.0);
+  for (int i = 1; i <= n_panels; ++i) {
+    double xi = i * dx;
+    double f_curr = evaluate(xi);
+    sum += 0.5 * (f_prev + f_curr) * dx;
+    f_prev = f_curr;
+  }
+  return std::min(sum, 1.0);
 }
 
 //==============================================================================
@@ -449,6 +539,30 @@ double Normal::evaluate(double x) const
 
   // Apply normalization for truncation
   return pdf * norm_factor_;
+}
+
+double Normal::cdf(double x) const
+{
+  // Return 0/1 outside truncation bounds
+  if (x <= lower_)
+    return 0.0;
+  if (x >= upper_)
+    return 1.0;
+
+  // Standardize
+  double z = (x - mean_value_) / std_dev_;
+  double F = standard_normal_cdf(z);
+
+  if (!is_truncated_) {
+    return F;
+  }
+
+  // For truncated normal: F_trunc(x) = (Phi(z) - Phi(alpha)) / (Phi(beta) - Phi(alpha))
+  double alpha = (lower_ - mean_value_) / std_dev_;
+  double beta = (upper_ - mean_value_) / std_dev_;
+  double F_alpha = standard_normal_cdf(alpha);
+  double F_beta = standard_normal_cdf(beta);
+  return (F - F_alpha) / (F_beta - F_alpha);
 }
 
 //==============================================================================
@@ -628,6 +742,41 @@ double Tabular::evaluate(double x) const
   }
 }
 
+double Tabular::cdf(double x) const
+{
+  // Return 0/1 for values outside the tabulated range
+  if (x <= x_.front())
+    return 0.0;
+  if (x >= x_.back())
+    return 1.0;
+
+  // Find the bin containing x
+  auto it = std::upper_bound(x_.begin(), x_.end(), x);
+  int i = static_cast<int>(it - x_.begin()) - 1;
+  i = std::max(0, std::min(i, static_cast<int>(x_.size()) - 2));
+
+  // Interpolate within the bin to get CDF value
+  if (interp_ == Interpolation::histogram) {
+    return c_[i] + p_[i] * (x - x_[i]);
+  } else if (interp_ == Interpolation::lin_lin) {
+    double dx = x_[i + 1] - x_[i];
+    double t = (x - x_[i]) / dx;
+    double p_at_x = (1.0 - t) * p_[i] + t * p_[i + 1];
+    return c_[i] + 0.5 * (p_[i] + p_at_x) * (x - x_[i]);
+  } else if (interp_ == Interpolation::log_lin) {
+    double m = std::log(p_[i + 1] / p_[i]) / (x_[i + 1] - x_[i]);
+    double dx = x - x_[i];
+    return c_[i] + p_[i] * dx * exprel(m * dx);
+  } else if (interp_ == Interpolation::log_log) {
+    double m = std::log((x_[i + 1] * p_[i + 1]) / (x_[i] * p_[i])) /
+               std::log(x_[i + 1] / x_[i]);
+    double lnr = std::log(x / x_[i]);
+    return c_[i] + x_[i] * p_[i] * lnr * exprel(m * lnr);
+  } else {
+    UNREACHABLE();
+  }
+}
+
 //==============================================================================
 // Equiprobable implementation
 //==============================================================================
@@ -654,6 +803,29 @@ double Equiprobable::evaluate(double x) const
   } else {
     return 1.0 / (x_max - x_min);
   }
+}
+
+double Equiprobable::cdf(double x) const
+{
+  std::size_t n = x_.size();
+  if (n == 0)
+    return 0.0;
+
+  if (x <= x_.front())
+    return 0.0;
+  if (x >= x_.back())
+    return 1.0;
+
+  // Each of the (n-1) bins has equal probability 1/(n-1).
+  // Find which bin x falls in and interpolate linearly.
+  double bin_prob = 1.0 / (n - 1);
+  for (std::size_t i = 0; i < n - 1; ++i) {
+    if (x <= x_[i + 1]) {
+      double frac = (x - x_[i]) / (x_[i + 1] - x_[i]);
+      return (i + frac) * bin_prob;
+    }
+  }
+  return 1.0;
 }
 
 //==============================================================================
@@ -739,6 +911,16 @@ double Mixture::evaluate(double x) const
   double result = 0.0;
   for (std::size_t i = 0; i < distribution_.size(); ++i) {
     result += prob_[i] * distribution_[i]->evaluate(x);
+  }
+  return result;
+}
+
+double Mixture::cdf(double x) const
+{
+  // Mixture CDF is the probability-weighted sum of component CDFs
+  double result = 0.0;
+  for (std::size_t i = 0; i < distribution_.size(); ++i) {
+    result += prob_[i] * distribution_[i]->cdf(x);
   }
   return result;
 }

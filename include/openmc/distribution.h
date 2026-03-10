@@ -44,6 +44,11 @@ public:
   //! \return f(x)
   virtual double evaluate(double x) const;
 
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x)
+  virtual double cdf(double x) const;
+
   //! Return integral of distribution
   //! \return Integral of distribution
   virtual double integral() const { return 1.0; };
@@ -128,6 +133,11 @@ public:
 
   double integral() const override { return di_.integral(); };
 
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x)
+  double cdf(double x) const override;
+
   //! Override set_bias as no-op (bias handled in constructor)
   void set_bias(std::unique_ptr<Distribution> bias) override {}
 
@@ -145,6 +155,7 @@ protected:
 
 private:
   vector<double> x_;      //!< Possible outcomes
+  vector<double> p_;      //!< Normalized probabilities for each outcome
   vector<double> weight_; //!< Importance weights (empty if unbiased)
   DiscreteIndex di_; //!< Discrete probability distribution of outcome indices
 };
@@ -162,6 +173,11 @@ public:
   //! \param x Point to evaluate f(x)
   //! \return f(x)
   double evaluate(double x) const override;
+
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x)
+  double cdf(double x) const override;
 
   double a() const { return a_; }
   double b() const { return b_; }
@@ -192,6 +208,11 @@ public:
   //! \param x Point to evaluate f(x)
   //! \return f(x)
   double evaluate(double x) const override;
+
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x)
+  double cdf(double x) const override;
 
   double a() const { return std::pow(offset_, ninv_); }
   double b() const { return std::pow(offset_ + span_, ninv_); }
@@ -224,6 +245,11 @@ public:
   //! \return f(x)
   double evaluate(double x) const override;
 
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x)
+  double cdf(double x) const override;
+
   double theta() const { return theta_; }
 
 protected:
@@ -249,6 +275,11 @@ public:
   //! \param x Point to evaluate f(x)
   //! \return f(x)
   double evaluate(double x) const override;
+
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x)
+  double cdf(double x) const override;
 
   double a() const { return a_; }
   double b() const { return b_; }
@@ -282,6 +313,11 @@ public:
   //! \param x Point to evaluate f(x)
   //! \return f(x), accounting for truncation normalization
   double evaluate(double x) const override;
+
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x), accounting for truncation normalization
+  double cdf(double x) const override;
 
   double mean_value() const { return mean_value_; }
   double std_dev() const { return std_dev_; }
@@ -321,6 +357,11 @@ public:
   //! \param x Point to evaluate f(x)
   //! \return f(x)
   double evaluate(double x) const override;
+
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x)
+  double cdf(double x) const override;
 
   // properties
   vector<double>& x() { return x_; }
@@ -364,6 +405,11 @@ public:
   //! \return f(x)
   double evaluate(double x) const override;
 
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x)
+  double cdf(double x) const override;
+
   const vector<double>& x() const { return x_; }
 
 protected:
@@ -395,6 +441,11 @@ public:
   //! \param x Point to evaluate f(x)
   //! \return f(x)
   double evaluate(double x) const override;
+
+  //! Evaluate cumulative distribution function, F(x), at a point
+  //! \param x Point to evaluate F(x)
+  //! \return F(x)
+  double cdf(double x) const override;
 
   //! Override set_bias as no-op (bias handled in constructor)
   void set_bias(std::unique_ptr<Distribution> bias) override {}
