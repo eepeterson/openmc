@@ -7,15 +7,13 @@ integrator, depletion system solver, and operator helper classes
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import namedtuple, defaultdict
-from collections.abc import Iterable, Callable
+from collections.abc import Iterable
 from copy import deepcopy
-from inspect import signature
 from numbers import Real, Integral
 from pathlib import Path
 from textwrap import dedent
 import time
 from typing import Optional, Union, Sequence
-from warnings import warn
 
 import numpy as np
 from uncertainties import ufloat
@@ -690,11 +688,11 @@ class Integrator(ABC):
         if isinstance(solver, str):
             # Delay importing of cram module, which requires this file
             if solver == "cram48":
-                from .cram import CRAM48
-                self._solver = CRAM48
+                from .cram import Cram48Solver
+                self._solver = Cram48Solver
             elif solver == "cram16":
-                from .cram import CRAM16
-                self._solver = CRAM16
+                from .cram import Cram16Solver
+                self._solver = Cram16Solver
             else:
                 raise ValueError(
                     f"Solver {solver} not understood. Expected 'cram48' or 'cram16'")
@@ -707,28 +705,9 @@ class Integrator(ABC):
 
     @solver.setter
     def solver(self, func):
-        if not isinstance(func, Callable):
+        if not isinstance(func, DepSystemSolver):
             raise TypeError(
-                f"Solver must be callable, not {type(func)}")
-        try:
-            sig = signature(func)
-        except ValueError:
-            # Guard against callables that aren't introspectable, e.g.
-            # fortran functions wrapped by F2PY
-            warn(f"Could not determine arguments to {func}. Proceeding anyways")
-            self._solver = func
-            return
-
-        # Inspect arguments
-        if len(sig.parameters) != 3:
-            raise ValueError("Function {} does not support three arguments: "
-                             "{!s}".format(func, sig))
-
-        for ix, param in enumerate(sig.parameters.values()):
-            if param.kind in {param.KEYWORD_ONLY, param.VAR_KEYWORD}:
-                raise ValueError(
-                    f"Keyword arguments like {ix} at position {param} are not allowed")
-
+                f"Solver must be a DepSystemSolver instance, not {type(func)}")
         self._solver = func
 
     def _timed_deplete(self, n, rates, dt, i=None, matrix_func=None):
