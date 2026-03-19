@@ -6,6 +6,7 @@ loaded from an .xml file and all the nuclides are linked together.
 
 from io import StringIO
 from itertools import chain
+from graphlib import TopologicalSorter
 import math
 import numpy as np
 import re
@@ -290,6 +291,42 @@ class Chain:
     def unstable_nuclides(self) -> List[Nuclide]:
         """List of unstable nuclides available in the chain"""
         return [nuc for nuc in self.nuclides if nuc.half_life is not None]
+
+    @property
+    def decay_topo_permutation(self) -> np.ndarray:
+        """Permutation that makes a decay-only depletion matrix lower-triangular.
+
+        Returns a permutation vector ``perm`` of length ``len(self)`` where
+        ``perm[new_idx] = old_idx``.  Ties within each topological level
+        are broken by ``(-A, -Z, -m)``.
+
+        Returns
+        -------
+        numpy.ndarray of int
+            Permutation vector of length ``len(self)``.
+
+        """
+        keys = [(-a, -z, -m) for z, a, m in
+                (zam(nuc.name) for nuc in self.nuclides)]
+
+        ts = TopologicalSorter()
+        for i, nuc in enumerate(self.nuclides):
+            ts.add(i)
+            if nuc.half_life is not None:
+                for _, target, _ in nuc.decay_modes:
+                    if target is not None and target in self.nuclide_dict:
+                        j = self.nuclide_dict[target]
+                        if j != i:
+                            ts.add(j, i)
+
+        ts.prepare()
+        order = []
+        while ts.is_active():
+            level = sorted(ts.get_ready(), key=lambda i: keys[i])
+            order.extend(level)
+            ts.done(*level)
+
+        return np.array(order, dtype=int)
 
     def add_nuclide(self, nuclide: Nuclide):
         """Add a nuclide to the depletion chain
