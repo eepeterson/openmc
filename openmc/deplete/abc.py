@@ -699,6 +699,17 @@ class Integrator(ABC):
         else:
             self.solver = solver
 
+        # Build a decay-specific solver that uses forward substitution on
+        # a topologically permuted (lower-triangular) decay matrix
+        from .cram import IPFCramSolver, IPFCramDecaySolver
+        if (isinstance(self._solver, IPFCramSolver)
+                and self.chain is not None
+                and hasattr(self.chain, 'decay_topo_permutation')):
+            self._decay_solver = IPFCramDecaySolver.from_solver(
+                self._solver, self.chain.decay_topo_permutation)
+        else:
+            self._decay_solver = None
+
     @property
     def solver(self):
         return self._solver
@@ -712,8 +723,13 @@ class Integrator(ABC):
 
     def _timed_deplete(self, n, rates, dt, i=None, matrix_func=None):
         start = time.time()
+        # Use the triangular decay solver when rates are all zero
+        if self._decay_solver is not None and not rates.any():
+            solver = self._decay_solver
+        else:
+            solver = self._solver
         results = deplete(
-            self._solver, self.chain, n, rates, dt, i, matrix_func,
+            solver, self.chain, n, rates, dt, i, matrix_func,
             self.transfer_rates, self.external_source_rates)
         return time.time() - start, results
 

@@ -12,7 +12,8 @@ from openmc.checkvalue import check_type, check_length
 from .abc import DepSystemSolver
 from .._sparse_compat import csc_array, eye_array
 
-__all__ = ["CRAM16", "CRAM48", "Cram16Solver", "Cram48Solver", "IPFCramSolver"]
+__all__ = ["CRAM16", "CRAM48", "Cram16Solver", "Cram48Solver",
+           "IPFCramSolver", "IPFCramDecaySolver"]
 
 
 class IPFCramSolver(DepSystemSolver):
@@ -181,3 +182,81 @@ Cram48Solver = IPFCramSolver(c48_alpha, c48_theta, c48_alpha0)
 del c48_alpha, c48_alpha0, c48_theta, alpha_r, alpha_i, theta_r, theta_i
 
 CRAM48 = Cram48Solver.__call__
+
+
+class IPFCramDecaySolver(DepSystemSolver):
+    """CRAM solver for pure-decay steps with lower-triangular optimization
+
+    Permutes the transmutation matrix into a strictly lower-triangular form
+    using a topological ordering of the decay chain, then solves using forward
+    substitution (:func:`scipy.sparse.linalg.spsolve_triangular`) instead of
+    a general sparse solve. This eliminates spurious negative concentrations
+    that arise from CRAM applied to decay-only matrices.
+
+    Parameters
+    ----------
+    alpha : numpy.ndarray
+        Complex residues of poles used in the factorization
+    theta : numpy.ndarray
+        Complex poles
+    alpha0 : float
+        Limit of the approximation at infinity
+    permutation : numpy.ndarray
+        Permutation array from :attr:`Chain.decay_topo_permutation`
+
+    """
+
+    def __init__(self, alpha, theta, alpha0, permutation):
+        self.alpha = alpha
+        self.theta = theta
+        self.alpha0 = alpha0
+        self.permutation = permutation
+
+    @classmethod
+    def from_solver(cls, solver, permutation):
+        """Construct from an existing :class:`IPFCramSolver`
+
+        Parameters
+        ----------
+        solver : IPFCramSolver
+            Solver whose CRAM coefficients will be reused
+        permutation : numpy.ndarray
+            Permutation array from :attr:`Chain.decay_topo_permutation`
+
+        Returns
+        -------
+        IPFCramDecaySolver
+
+        """
+        return cls(solver.alpha, solver.theta, solver.alpha0, permutation)
+
+    def __call__(self, A, n0, dt):
+        """Solve depletion equations using IPF CRAM with triangular solve
+
+        The matrix ``A`` is permuted into lower-triangular form before
+        solving, and the result is permuted back to the original order.
+
+        Parameters
+        ----------
+        A : scipy.sparse.csc_array
+            Sparse transmutation matrix (decay-only)
+        n0 : numpy.ndarray
+            Initial compositions
+        dt : float
+            Time [s] of the specific interval to be solved
+
+        Returns
+        -------
+        numpy.ndarray
+            Final compositions after ``dt``
+
+        """
+        p = self.permutation
+        A = dt * csc_array(A[np.ix_(p, p)], dtype=np.float64)
+        y = n0[p].copy()
+        ident = eye_array(A.shape[0], format='csc')
+        for alpha, theta in zip(self.alpha, self.theta):
+            y += 2*np.real(alpha*sla.spsolve_triangular(A - theta*ident, y))
+        result = np.empty_like(y)
+        result[p] = y * self.alpha0
+        return result

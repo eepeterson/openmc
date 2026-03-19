@@ -310,14 +310,23 @@ class Chain:
                 (zam(nuc.name) for nuc in self.nuclides)]
 
         ts = TopologicalSorter()
+        he4_idx = self.nuclide_dict.get('He4')
+        h1_idx = self.nuclide_dict.get('H1')
         for i, nuc in enumerate(self.nuclides):
             ts.add(i)
             if nuc.half_life is not None:
-                for _, target, _ in nuc.decay_modes:
+                for decay_type, target, _ in nuc.decay_modes:
                     if target is not None and target in self.nuclide_dict:
                         j = self.nuclide_dict[target]
                         if j != i:
                             ts.add(j, i)
+                    # Alpha and proton decay also feed He4 / H1
+                    if 'alpha' in decay_type and he4_idx is not None:
+                        if he4_idx != i:
+                            ts.add(he4_idx, i)
+                    elif 'p' in decay_type and h1_idx is not None:
+                        if h1_idx != i:
+                            ts.add(h1_idx, i)
 
         ts.prepare()
         order = []
