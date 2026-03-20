@@ -423,7 +423,7 @@ def test_fission_yield_attribute(simple_chain):
     dummy_conc = [[1, 2]] * (len(empty_chain.fission_yields) + 1)
     with pytest.raises(
             ValueError, match="fission yield.*not equal.*compositions"):
-        pool.deplete(cram.CRAM48, empty_chain, dummy_conc, None, 0.5)
+        pool.deplete(cram.Cram48Solver, empty_chain, dummy_conc, None, 0.5)
 
 
 def test_validate(simple_chain):

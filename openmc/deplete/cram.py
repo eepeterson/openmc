@@ -107,7 +107,6 @@ CRAM16_THETA = np.array([
 CRAM16_ALPHA0 = 2.124853710495224e-16
 
 Cram16Solver = IPFCramSolver(CRAM16_ALPHA, CRAM16_THETA, CRAM16_ALPHA0)
-CRAM16 = Cram16Solver.__call__
 
 # Coefficients for 48th order IPF CRAM
 _theta_r = np.array([
@@ -174,4 +173,3 @@ CRAM48_ALPHA0 = 2.258038182743983e-47
 del _alpha_r, _alpha_i
 
 Cram48Solver = IPFCramSolver(CRAM48_ALPHA, CRAM48_THETA, CRAM48_ALPHA0)
-CRAM48 = Cram48Solver.__call__

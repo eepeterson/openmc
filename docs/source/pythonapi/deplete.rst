@@ -150,8 +150,8 @@ data, such as number densities and reaction rates for each material.
    Results
    StepResult
 
-The following class and functions are used to solve the depletion equations,
-with :func:`cram.CRAM48` being the default.
+The following class and function are used to solve the depletion equations,
+with :data:`cram.Cram48Solver` being the default.
 
 .. autosummary::
    :toctree: generated
@@ -165,8 +165,6 @@ with :func:`cram.CRAM48` being the default.
    :nosignatures:
    :template: myfunction.rst
 
-   cram.CRAM16
-   cram.CRAM48
    pool.deplete
 
 .. data:: pool.USE_MULTIPROCESSING
