@@ -100,6 +100,19 @@ def deplete(func, chain, n, rates, dt, current_timestep=None, matrix_func=None,
         matrices = map(matrix_func, repeat(chain), rates, fission_yields,
                        *matrix_args)
 
+    # When all reaction rates are zero (decay-only step) and no transfer
+    # rates or external sources apply, use the cached decay matrix
+    # exponential for a fast sparse matrix-vector multiply instead of
+    # running the full CRAM solver per material.
+    has_transfers = (transfer_rates is not None and
+                     current_timestep in transfer_rates.external_timesteps)
+    has_ext_sources = (external_source_rates is not None and
+                       current_timestep in external_source_rates.external_timesteps)
+    if (matrix_func is None and not has_transfers and not has_ext_sources
+            and not np.any(rates)):
+        M_exp = chain.decay_matrix_exponential(dt)
+        return [M_exp @ n_i for n_i in n]
+
     if (transfer_rates is not None and
         current_timestep in transfer_rates.external_timesteps):
         # Calculate transfer rate terms as diagonal matrices
