@@ -12,8 +12,6 @@ from openmc.checkvalue import check_type, check_length
 from .abc import DepSystemSolver
 from .._sparse_compat import csc_array, eye_array
 
-__all__ = ["CRAM16", "CRAM48", "Cram16Solver", "Cram48Solver", "IPFCramSolver"]
-
 
 class IPFCramSolver(DepSystemSolver):
     r"""CRAM depletion solver that uses incomplete partial factorization
@@ -83,8 +81,8 @@ class IPFCramSolver(DepSystemSolver):
         return y * self.alpha0
 
 
-# Coefficients for IPF Cram 16
-c16_alpha = np.array([
+# Coefficients for 16th order IPF CRAM
+CRAM16_ALPHA = np.array([
     +5.464930576870210e+3 - 3.797983575308356e+4j,
     +9.045112476907548e+1 - 1.115537522430261e+3j,
     +2.344818070467641e+2 - 4.228020157070496e+2j,
@@ -95,7 +93,7 @@ c16_alpha = np.array([
     +2.394538338734709e+1 - 5.650522971778156e+0j],
     dtype=np.complex128)
 
-c16_theta = np.array([
+CRAM16_THETA = np.array([
     +3.509103608414918 + 8.436198985884374j,
     +5.948152268951177 + 3.587457362018322j,
     -5.264971343442647 + 16.22022147316793j,
@@ -106,15 +104,13 @@ c16_theta = np.array([
     -10.84391707869699 + 19.27744616718165j],
     dtype=np.complex128)
 
-c16_alpha0 = 2.124853710495224e-16
-Cram16Solver = IPFCramSolver(c16_alpha, c16_theta, c16_alpha0)
+CRAM16_ALPHA0 = 2.124853710495224e-16
+
+Cram16Solver = IPFCramSolver(CRAM16_ALPHA, CRAM16_THETA, CRAM16_ALPHA0)
 CRAM16 = Cram16Solver.__call__
 
-del c16_alpha, c16_alpha0, c16_theta
-
-# Coefficients for 48th order IPF Cram
-
-theta_r = np.array([
+# Coefficients for 48th order IPF CRAM
+_theta_r = np.array([
     -4.465731934165702e+1, -5.284616241568964e+0,
     -8.867715667624458e+0, +3.493013124279215e+0,
     +1.564102508858634e+1, +1.742097597385893e+1,
@@ -128,7 +124,7 @@ theta_r = np.array([
     +1.901323489060250e+1, +1.885508331552577e+1,
     -1.734689708174982e+1, +1.316284237125190e+1])
 
-theta_i = np.array([
+_theta_i = np.array([
     +6.233225190695437e+1, +4.057499381311059e+1,
     +4.325515754166724e+1, +3.281615453173585e+1,
     +1.558061616372237e+1, +1.076629305714420e+1,
@@ -142,9 +138,10 @@ theta_i = np.array([
     +1.194282058271408e+0, +3.583428564427879e+0,
     +4.883941101108207e+1, +2.042951874827759e+1])
 
-c48_theta = np.array(theta_r + theta_i * 1j, dtype=np.complex128)
+CRAM48_THETA = np.array(_theta_r + _theta_i * 1j, dtype=np.complex128)
+del _theta_r, _theta_i
 
-alpha_r = np.array([
+_alpha_r = np.array([
     +6.387380733878774e+2, +1.909896179065730e+2,
     +4.236195226571914e+2, +4.645770595258726e+2,
     +7.765163276752433e+2, +1.907115136768522e+3,
@@ -158,7 +155,7 @@ alpha_r = np.array([
     +8.766654491283722e+1, +1.056007619389650e+2,
     +7.738987569039419e+1, +1.041366366475571e+2])
 
-alpha_i = np.array([
+_alpha_i = np.array([
     -6.743912502859256e+2, -3.973203432721332e+2,
     -2.041233768918671e+3, -1.652917287299683e+3,
     -1.783617639907328e+4, -5.887068595142284e+4,
@@ -172,12 +169,9 @@ alpha_i = np.array([
     -4.596464999363902e+3, -1.738294585524067e+3,
     -4.311715386228984e+1, -2.777743732451969e+2])
 
-c48_alpha = np.array(alpha_r + alpha_i * 1j, dtype=np.complex128)
+CRAM48_ALPHA = np.array(_alpha_r + _alpha_i * 1j, dtype=np.complex128)
+CRAM48_ALPHA0 = 2.258038182743983e-47
+del _alpha_r, _alpha_i
 
-c48_alpha0 = 2.258038182743983e-47
-
-Cram48Solver = IPFCramSolver(c48_alpha, c48_theta, c48_alpha0)
-
-del c48_alpha, c48_alpha0, c48_theta, alpha_r, alpha_i, theta_r, theta_i
-
+Cram48Solver = IPFCramSolver(CRAM48_ALPHA, CRAM48_THETA, CRAM48_ALPHA0)
 CRAM48 = Cram48Solver.__call__
