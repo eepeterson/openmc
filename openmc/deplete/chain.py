@@ -272,6 +272,7 @@ class Chain:
         self._fission_yields = None
         self._decay_matrix = None
         self._decay_topo_permutation = None
+        self._decay_matrix_exp = {}
 
     def __contains__(self, nuclide):
         return nuclide in self.nuclide_dict
@@ -708,6 +709,134 @@ class Chain:
 
             self._decay_matrix = csc_array((vals, (rows, cols)), shape=(n, n))
         return self._decay_matrix
+
+    def decay_matrix_exponential(self, dt):
+        r"""Compute or retrieve a cached sparse matrix exponential of the decay
+        matrix scaled by a timestep.
+
+        Returns a sparse matrix :math:`M \approx \exp(A_{\text{decay}} \cdot
+        \Delta t)` computed via CRAM48 applied to each basis vector, exploiting
+        the lower-triangular structure (after topological permutation) for
+        efficient dict-based forward substitution.
+
+        Parameters
+        ----------
+        dt : float
+            Time step in seconds.
+
+        Returns
+        -------
+        scipy.sparse.csc_array
+            Sparse matrix approximation of
+            :math:`\exp(A_{\text{decay}} \cdot \Delta t)`.
+
+        """
+        if dt in self._decay_matrix_exp:
+            return self._decay_matrix_exp[dt]
+
+        from .cram import Cram48Solver
+
+        n = len(self)
+        alpha = Cram48Solver.alpha
+        theta = Cram48Solver.theta
+        alpha0 = Cram48Solver.alpha0
+
+        # Permute decay matrix to lower-triangular form
+        perm = self.decay_topo_permutation
+        inv_perm = np.empty(n, dtype=int)
+        inv_perm[perm] = np.arange(n)
+
+        A = self.decay_matrix
+        A_perm = A[perm][:, perm]
+        A_perm_csc = csc_array(A_perm, dtype=np.float64)
+
+        # Extract structure from the lower-triangular permuted matrix.
+        # row_entries[i] = [(j, A[i,j]), ...] for j != i (predecessors in row)
+        # children[j] = list of row indices i (>j) where A[i,j] != 0
+        diag = np.zeros(n)
+        row_entries = [[] for _ in range(n)]
+        children = [[] for _ in range(n)]
+        for j in range(n):
+            col_start = A_perm_csc.indptr[j]
+            col_end = A_perm_csc.indptr[j + 1]
+            for idx in range(col_start, col_end):
+                i = A_perm_csc.indices[idx]
+                v = A_perm_csc.data[idx]
+                if i == j:
+                    diag[j] = v
+                else:
+                    row_entries[i].append((j, v))
+                    children[j].append(i)
+
+        descendants = [None] * n
+        for j in range(n - 1, -1, -1):
+            desc = set()
+            for c in children[j]:
+                desc.add(c)
+                if descendants[c] is not None:
+                    desc.update(descendants[c])
+            descendants[j] = desc if desc else None
+
+        # Scale matrix by dt
+        diag_dt = diag * dt
+        row_entries_dt = [
+            [(j, v * dt) for j, v in entries] for entries in row_entries
+        ]
+
+        # Apply IPF CRAM48 to each basis vector using dict-based forward sub
+        exp_rows = []
+        exp_cols = []
+        exp_vals = []
+
+        for col in range(n):
+            # Initial basis vector e_col: only entry at col = 1.0
+            y = {col: 1.0}
+
+            # IPF CRAM: y += 2*Re(alpha_k * solve(A*dt - theta_k*I, y))
+            for alpha_k, theta_k in zip(alpha, theta):
+                # Sparse forward substitution on lower-triangular system
+                # (A*dt - theta*I) x = y, solving for x
+                # Only visit col and its descendants
+                rhs = {}
+                for idx in y:
+                    rhs[idx] = y[idx]
+
+                x = {}
+                # Process col first (it's the topologically earliest)
+                if col in rhs:
+                    x[col] = rhs[col] / (diag_dt[col] - theta_k)
+
+                # Process descendants in topological order (ascending index)
+                if descendants[col] is not None:
+                    for idx in sorted(descendants[col]):
+                        val = rhs.get(idx, 0.0)
+                        for j, a_val in row_entries_dt[idx]:
+                            if j in x:
+                                val -= a_val * x[j]
+                        x[idx] = val / (diag_dt[idx] - theta_k)
+
+                # y += 2*Re(alpha_k * x)
+                for idx, xval in x.items():
+                    update = 2.0 * (alpha_k * xval).real
+                    if idx in y:
+                        y[idx] += update
+                    else:
+                        y[idx] = update
+
+            # Scale by alpha0 and collect nonzeros
+            orig_col = perm[col]
+            for idx, val in y.items():
+                val *= alpha0
+                if abs(val) > 1e-30:
+                    exp_rows.append(perm[idx])
+                    exp_cols.append(orig_col)
+                    exp_vals.append(val)
+
+        result = csc_array(
+            (exp_vals, (exp_rows, exp_cols)), shape=(n, n)
+        )
+        self._decay_matrix_exp[dt] = result
+        return result
 
     def form_rxn_matrix(self, rates, fission_yields=None):
         """Form the reaction-rate portion of the transmutation matrix.
@@ -1465,6 +1594,7 @@ def _invalidate_chain_cache(chain):
     """Invalidate the cache for a specific Chain (when it is modifed)."""
     chain._decay_matrix = None
     chain._decay_topo_permutation = None
+    chain._decay_matrix_exp = {}
     if hasattr(chain, '_xml_path'):
         # Remove all entries with the same path as self._xml_path
         for key in list(_CHAIN_CACHE.keys()):
