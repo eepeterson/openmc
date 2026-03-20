@@ -180,19 +180,8 @@ def test_bad_integrator_inputs():
     with pytest.raises(ValueError, match="Solver failure"):
         PredictorIntegrator(op, timesteps, power=1, solver="failure")
 
-    with pytest.raises(TypeError, match=".*callable.*NoneType"):
+    with pytest.raises(TypeError, match=".*DepSystemSolver.*NoneType"):
         PredictorIntegrator(op, timesteps, power=1, solver=None)
-
-    with pytest.raises(ValueError, match=".*arguments"):
-        PredictorIntegrator(op, timesteps, power=1, solver=mock_bad_solver_nargs)
-
-
-def mock_good_solver(A, n, t):
-    pass
-
-
-def mock_bad_solver_nargs(A, n):
-    pass
 
 
 @pytest.mark.parametrize("scheme", dummy_operator.SCHEMES)
@@ -220,18 +209,11 @@ def test_integrator(run_in_tmpdir, scheme):
     assert dep_time.shape == (2, )
     assert all(dep_time > 0)
 
-    integrator = bundle.solver(operator, [0.75], 1, solver=cram.CRAM48)
-    assert integrator.solver is cram.CRAM48
+    integrator = bundle.solver(operator, [0.75], 1, solver=cram.Cram48Solver)
+    assert integrator.solver is cram.Cram48Solver
 
     integrator = bundle.solver(operator, [0.75], 1, solver="cram16")
-    assert integrator.solver is cram.CRAM16
-
-    integrator.solver = mock_good_solver
-    assert integrator.solver is mock_good_solver
-
-    lfunc = lambda A, n, t: mock_good_solver(A, n, t)
-    integrator.solver = lfunc
-    assert integrator.solver is lfunc
+    assert integrator.solver is cram.Cram16Solver
 
 
 @pytest.mark.parametrize("integrator", INTEGRATORS)

@@ -7,15 +7,13 @@ integrator, depletion system solver, and operator helper classes
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import namedtuple, defaultdict
-from collections.abc import Iterable, Callable
+from collections.abc import Iterable
 from copy import deepcopy
-from inspect import signature
 from numbers import Real, Integral
 from pathlib import Path
 from textwrap import dedent
 import time
 from typing import Optional, Union, Sequence
-from warnings import warn
 
 import numpy as np
 from uncertainties import ufloat
@@ -561,15 +559,14 @@ class Integrator(ABC):
         seconds, 'min' means minutes, 'h' means hours, 'a' means Julian years
         and 'MWd/kg' indicates that the values are given in burnup (MW-d of
         energy deposited per kilogram of initial heavy metal).
-    solver : str or callable, optional
+    solver : str or DepSystemSolver, optional
         If a string, must be the name of the solver responsible for
         solving the Bateman equations.  Current options are:
 
             * ``cram16`` - 16th order IPF CRAM
             * ``cram48`` - 48th order IPF CRAM [default]
 
-        If a function or other callable, must adhere to the requirements in
-        :attr:`solver`.
+        If not a string, must be a :class:`DepSystemSolver` instance.
 
         .. versionadded:: 0.12
     continue_timesteps : bool, optional
@@ -595,20 +592,10 @@ class Integrator(ABC):
     source_rates : iterable of float
         Source rate in [W] or [neutron/sec] for each interval in
         :attr:`timesteps`
-    solver : callable
-        Function that will solve the Bateman equations
+    solver : DepSystemSolver
+        Solver instance used for the Bateman equations
         :math:`\frac{\partial}{\partial t}\vec{n} = A_i\vec{n}_i` with a step
         size :math:`t_i`. Can be configured using the ``solver`` argument.
-        User-supplied functions are expected to have the following signature:
-        ``solver(A, n0, t) -> n1`` where
-
-            * ``A`` is a :class:`scipy.sparse.csc_array` making up the
-              depletion matrix
-            * ``n0`` is a 1-D :class:`numpy.ndarray` of initial compositions
-              for a given material in atoms/cm3
-            * ``t`` is a float of the time step size in seconds, and
-            * ``n1`` is a :class:`numpy.ndarray` of compositions at the
-              next time step. Expected to be of the same shape as ``n0``
 
     transfer_rates : openmc.deplete.TransferRates
         Transfer rates for the depletion system used to model continuous
@@ -690,11 +677,11 @@ class Integrator(ABC):
         if isinstance(solver, str):
             # Delay importing of cram module, which requires this file
             if solver == "cram48":
-                from .cram import CRAM48
-                self._solver = CRAM48
+                from .cram import Cram48Solver
+                self._solver = Cram48Solver
             elif solver == "cram16":
-                from .cram import CRAM16
-                self._solver = CRAM16
+                from .cram import Cram16Solver
+                self._solver = Cram16Solver
             else:
                 raise ValueError(
                     f"Solver {solver} not understood. Expected 'cram48' or 'cram16'")
@@ -707,28 +694,9 @@ class Integrator(ABC):
 
     @solver.setter
     def solver(self, func):
-        if not isinstance(func, Callable):
+        if not isinstance(func, DepSystemSolver):
             raise TypeError(
-                f"Solver must be callable, not {type(func)}")
-        try:
-            sig = signature(func)
-        except ValueError:
-            # Guard against callables that aren't introspectable, e.g.
-            # fortran functions wrapped by F2PY
-            warn(f"Could not determine arguments to {func}. Proceeding anyways")
-            self._solver = func
-            return
-
-        # Inspect arguments
-        if len(sig.parameters) != 3:
-            raise ValueError("Function {} does not support three arguments: "
-                             "{!s}".format(func, sig))
-
-        for ix, param in enumerate(sig.parameters.values()):
-            if param.kind in {param.KEYWORD_ONLY, param.VAR_KEYWORD}:
-                raise ValueError(
-                    f"Keyword arguments like {ix} at position {param} are not allowed")
-
+                f"Solver must be a DepSystemSolver instance, not {type(func)}")
         self._solver = func
 
     def _timed_deplete(self, n, rates, dt, i=None, matrix_func=None):
@@ -1093,15 +1061,14 @@ class SIIntegrator(Integrator):
     n_steps : int, optional
         Number of stochastic iterations per depletion interval.
         Must be greater than zero. Default : 10
-    solver : str or callable, optional
+    solver : str or DepSystemSolver, optional
         If a string, must be the name of the solver responsible for
         solving the Bateman equations.  Current options are:
 
             * ``cram16`` - 16th order IPF CRAM
             * ``cram48`` - 48th order IPF CRAM [default]
 
-        If a function or other callable, must adhere to the requirements in
-        :attr:`solver`.
+        If not a string, must be a :class:`DepSystemSolver` instance.
 
         .. versionadded:: 0.12
     continue_timesteps : bool, optional
@@ -1129,20 +1096,10 @@ class SIIntegrator(Integrator):
         Power of the reactor in [W] for each interval in :attr:`timesteps`
     n_steps : int
         Number of stochastic iterations per depletion interval
-    solver : callable
-        Function that will solve the Bateman equations
+    solver : DepSystemSolver
+        Solver instance used for the Bateman equations
         :math:`\frac{\partial}{\partial t}\vec{n} = A_i\vec{n}_i` with a step
         size :math:`t_i`. Can be configured using the ``solver`` argument.
-        User-supplied functions are expected to have the following signature:
-        ``solver(A, n0, t) -> n1`` where
-
-            * ``A`` is a :class:`scipy.sparse.csc_array` making up the
-              depletion matrix
-            * ``n0`` is a 1-D :class:`numpy.ndarray` of initial compositions
-              for a given material in atoms/cm3
-            * ``t`` is a float of the time step size in seconds, and
-            * ``n1`` is a :class:`numpy.ndarray` of compositions at the
-              next time step. Expected to be of the same shape as ``n0``
 
         .. versionadded:: 0.12
 
