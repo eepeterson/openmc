@@ -24,7 +24,7 @@ from openmc.data import gnds_name, zam
 from openmc.exceptions import DataError
 from .nuclide import FissionYieldDistribution, Nuclide
 from .._xml import get_text
-from .._sparse_compat import csc_array, dok_array
+from .._sparse_compat import csc_array, csr_array, dok_array
 import openmc.data
 
 
@@ -726,9 +726,10 @@ class Chain:
 
         Returns
         -------
-        scipy.sparse.csc_array
+        scipy.sparse.csr_array
             Sparse matrix approximation of
-            :math:`\exp(A_{\text{decay}} \cdot \Delta t)`.
+            :math:`\exp(A_{\text{decay}} \cdot \Delta t)`.  Stored in CSR
+            format for efficient matrix-vector multiplication.
 
         """
         if dt in self._decay_matrix_exp:
@@ -832,7 +833,7 @@ class Chain:
                     exp_cols.append(orig_col)
                     exp_vals.append(val)
 
-        result = csc_array(
+        result = csr_array(
             (exp_vals, (exp_rows, exp_cols)), shape=(n, n)
         )
         self._decay_matrix_exp[dt] = result
