@@ -4,6 +4,7 @@ This module contains information about a depletion chain.  A depletion chain is
 loaded from an .xml file and all the nuclides are linked together.
 """
 
+from graphlib import TopologicalSorter
 from io import StringIO
 from itertools import chain
 import math
@@ -270,6 +271,7 @@ class Chain:
         self.nuclide_dict = {}
         self._fission_yields = None
         self._decay_matrix = None
+        self._decay_topo_permutation = None
 
     def __contains__(self, nuclide):
         return nuclide in self.nuclide_dict
@@ -291,6 +293,53 @@ class Chain:
     def unstable_nuclides(self) -> List[Nuclide]:
         """List of unstable nuclides available in the chain"""
         return [nuc for nuc in self.nuclides if nuc.half_life is not None]
+
+    @property
+    def decay_topo_permutation(self) -> np.ndarray:
+        """Permutation that makes a decay-only depletion matrix lower-triangular.
+
+        Returns a permutation vector ``perm`` of length ``len(self)`` where
+        ``perm[new_idx] = old_idx``.  Ties within each topological level
+        are broken by ``(-A, -Z, -m)``.
+
+        Returns
+        -------
+        numpy.ndarray of int
+            Permutation vector of length ``len(self)``.
+
+        """
+        if self._decay_topo_permutation is None:
+            keys = [(-a, -z, -m) for z, a, m in
+                    (zam(nuc.name) for nuc in self.nuclides)]
+
+            ts = TopologicalSorter()
+            he4_idx = self.nuclide_dict.get('He4')
+            h1_idx = self.nuclide_dict.get('H1')
+            for i, nuc in enumerate(self.nuclides):
+                ts.add(i)
+                if nuc.half_life is not None:
+                    for decay_type, target, _ in nuc.decay_modes:
+                        if target is not None and target in self.nuclide_dict:
+                            j = self.nuclide_dict[target]
+                            if j != i:
+                                ts.add(j, i)
+                        # Alpha and proton decay also feed He4 / H1
+                        if 'alpha' in decay_type and he4_idx is not None:
+                            if he4_idx != i:
+                                ts.add(he4_idx, i)
+                        elif 'p' in decay_type and h1_idx is not None:
+                            if h1_idx != i:
+                                ts.add(h1_idx, i)
+
+            ts.prepare()
+            order = []
+            while ts.is_active():
+                level = sorted(ts.get_ready(), key=lambda i: keys[i])
+                order.extend(level)
+                ts.done(*level)
+
+            self._decay_topo_permutation = np.array(order, dtype=int)
+        return self._decay_topo_permutation
 
     def add_nuclide(self, nuclide: Nuclide):
         """Add a nuclide to the depletion chain
@@ -1415,6 +1464,7 @@ def _get_chain(
 def _invalidate_chain_cache(chain):
     """Invalidate the cache for a specific Chain (when it is modifed)."""
     chain._decay_matrix = None
+    chain._decay_topo_permutation = None
     if hasattr(chain, '_xml_path'):
         # Remove all entries with the same path as self._xml_path
         for key in list(_CHAIN_CACHE.keys()):
