@@ -1,7 +1,7 @@
 """abc module.
 
 This module contains Abstract Base Classes for implementing operator,
-integrator, depletion system solver, and operator helper classes
+integrator, and operator helper classes
 """
 
 from __future__ import annotations
@@ -24,17 +24,12 @@ from openmc.utility_funcs import change_directory
 from openmc import Material
 from .stepresult import StepResult
 from .chain import _get_chain
+from .cram import Cram48Solver, Cram16Solver, DepSystemSolver
 from .results import Results, _SECONDS_PER_MINUTE, _SECONDS_PER_HOUR, \
     _SECONDS_PER_DAY, _SECONDS_PER_JULIAN_YEAR
 from .pool import deplete
 from .reaction_rates import ReactionRates
 from .transfer_rates import TransferRates, ExternalSourceRates
-
-
-__all__ = [
-    "OperatorResult", "TransportOperator",
-    "ReactionRateHelper", "NormalizationHelper", "FissionYieldHelper",
-    "Integrator", "SIIntegrator", "DepSystemSolver", "add_params"]
 
 
 def _normalize_timesteps(
@@ -675,12 +670,9 @@ class Integrator(ABC):
         self.external_source_rates = None
 
         if isinstance(solver, str):
-            # Delay importing of cram module, which requires this file
             if solver == "cram48":
-                from .cram import Cram48Solver
                 self._solver = Cram48Solver
             elif solver == "cram16":
-                from .cram import Cram16Solver
                 self._solver = Cram16Solver
             else:
                 raise ValueError(
@@ -1235,40 +1227,3 @@ class SIIntegrator(Integrator):
             self.operator.write_bos_data(self._i_res + len(self))
 
         self.operator.finalize()
-
-
-class DepSystemSolver(ABC):
-    r"""Abstract class for solving depletion equations
-
-    Responsible for solving
-
-    .. math::
-
-        \frac{\partial \vec{N}}{\partial t} = \bar{A}\vec{N}(t),
-
-    for :math:`0< t\leq t +\Delta t`, given :math:`\vec{N}(0) = \vec{N}_0`
-
-    """
-
-    @abstractmethod
-    def __call__(self, A, n0, dt):
-        """Solve the linear system of equations for depletion
-
-        Parameters
-        ----------
-        A : scipy.sparse.csc_array
-            Sparse transmutation matrix ``A[j, i]`` describing rates at
-            which isotope ``i`` transmutes to isotope ``j``
-        n0 : numpy.ndarray
-            Initial compositions, typically given in number of atoms in some
-            material or an atom density
-        dt : float
-            Time [s] of the specific interval to be solved
-
-        Returns
-        -------
-        numpy.ndarray
-            Final compositions after ``dt``. Should be of identical shape
-            to ``n0``.
-
-        """

@@ -283,7 +283,7 @@ the following abstract base classes:
 
    abc.Integrator
    abc.SIIntegrator
-   abc.DepSystemSolver
+   cram.DepSystemSolver
 
 R2S Automation
 --------------
