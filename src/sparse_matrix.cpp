@@ -85,6 +85,36 @@ CSCPattern CSCPattern::permute(const vector<int>& perm) const
   return CSCPattern::from_triplets(n, new_rows, new_cols);
 }
 
+bool CSCPattern::operator==(const CSCPattern& other) const
+{
+  return n_ == other.n_ && indptr_ == other.indptr_;
+}
+
+CSCPattern CSCPattern::with_diagonal() const
+{
+  // Collect all existing entries plus any missing diagonal entries
+  vector<int> new_rows;
+  vector<int> new_cols;
+  new_rows.reserve(nnz() + n_);
+  new_cols.reserve(nnz() + n_);
+
+  for (int col = 0; col < n_; ++col) {
+    bool has_diag = false;
+    for (int idx = indptr_[col]; idx < indptr_[col + 1]; ++idx) {
+      new_rows.push_back(indices_[idx]);
+      new_cols.push_back(col);
+      if (indices_[idx] == col)
+        has_diag = true;
+    }
+    if (!has_diag) {
+      new_rows.push_back(col);
+      new_cols.push_back(col);
+    }
+  }
+
+  return CSCPattern::from_triplets(n_, new_rows, new_cols);
+}
+
 //==============================================================================
 // CSCMatrix implementation
 //==============================================================================

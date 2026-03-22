@@ -46,6 +46,17 @@ public:
   //! \param perm Permutation vector: new_index -> old_index
   CSCPattern permute(const vector<int>& perm) const;
 
+  //! Return a new pattern with all diagonal entries forced present.
+  //! Existing entries (including any diagonals already present) are preserved.
+  CSCPattern with_diagonal() const;
+
+  //! Structural equality check. Two patterns are equal iff they have the same
+  //! dimension and identical column pointers. For matrices derived from the
+  //! same depletion chain, identical column structure guarantees identical row
+  //! indices, so checking indices_ is not necessary.
+  bool operator==(const CSCPattern& other) const;
+  bool operator!=(const CSCPattern& other) const { return !(*this == other); }
+
 private:
   int n_ {0};           //!< Matrix dimension
   vector<int> indptr_;  //!< Column pointers [n+1]
