@@ -7,7 +7,6 @@
 #include "openmc/string_utils.h"
 
 namespace openmc {
-namespace {
 
 constexpr const char* ATOMIC_SYMBOL[] = {"", "H", "He", "Li", "Be", "B", "C",
   "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
@@ -20,29 +19,17 @@ constexpr const char* ATOMIC_SYMBOL[] = {"", "H", "He", "Li", "Be", "B", "C",
   "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg",
   "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og"};
 
-constexpr int MAX_Z =
-  static_cast<int>(sizeof(ATOMIC_SYMBOL) / sizeof(ATOMIC_SYMBOL[0])) - 1;
-
-bool is_integer_string(const std::string& s)
+const char* atomic_symbol(int Z)
 {
-  if (s.empty())
-    return false;
-  size_t i = 0;
-  if (s[0] == '-' || s[0] == '+') {
-    if (s.size() == 1)
-      return false;
-    i = 1;
+  if (Z >= 1 && Z <= MAX_ATOMIC_NUMBER) {
+    return ATOMIC_SYMBOL[Z];
   }
-  for (; i < s.size(); ++i) {
-    if (!std::isdigit(static_cast<unsigned char>(s[i])))
-      return false;
-  }
-  return true;
+  return "";
 }
 
 int atomic_number_from_symbol(std::string_view symbol)
 {
-  for (int z = 1; z <= MAX_Z; ++z) {
+  for (int z = 1; z <= MAX_ATOMIC_NUMBER; ++z) {
     if (symbol == ATOMIC_SYMBOL[z]) {
       return z;
     }
@@ -105,6 +92,25 @@ bool parse_gnds_nuclide(std::string_view name, int& Z, int& A, int& m)
   return Z != 0;
 }
 
+namespace {
+
+bool is_integer_string(const std::string& s)
+{
+  if (s.empty())
+    return false;
+  size_t i = 0;
+  if (s[0] == '-' || s[0] == '+') {
+    if (s.size() == 1)
+      return false;
+    i = 1;
+  }
+  for (; i < s.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(s[i])))
+      return false;
+  }
+  return true;
+}
+
 // Helper to convert nuclear PDG number to nuclide name
 std::string nuclide_name_from_pdg(int32_t pdg)
 {
@@ -113,7 +119,7 @@ std::string nuclide_name_from_pdg(int32_t pdg)
   int A = (code / 10) % 1000;
   int Z = (code / 10000) % 1000;
 
-  if (Z <= 0 || Z > MAX_Z || A <= 0 || A > 999) {
+  if (Z <= 0 || Z > MAX_ATOMIC_NUMBER || A <= 0 || A > 999) {
     throw std::invalid_argument {
       "Invalid nuclear PDG number: " + std::to_string(pdg)};
   }

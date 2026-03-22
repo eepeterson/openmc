@@ -179,6 +179,33 @@ constexpr int ParticleType::transport_index() const
 // Legacy enum code (0..3) to ParticleType conversion
 ParticleType legacy_particle_index_to_type(int code);
 
+//------------------------------------------------------------------------------
+// Nuclide name / atomic number utilities
+//------------------------------------------------------------------------------
+
+//! Maximum atomic number supported
+inline constexpr int MAX_ATOMIC_NUMBER = 118;
+
+//! Look up atomic number from element symbol
+//! \param symbol Element symbol, e.g. "U", "He"
+//! \return Atomic number Z, or 0 if not found
+int atomic_number_from_symbol(std::string_view symbol);
+
+//! Get element symbol from atomic number
+//! \param Z Atomic number (1..118)
+//! \return Element symbol string, e.g. "U", "He"
+const char* atomic_symbol(int Z);
+
+//! Parse a GNDS nuclide name into (Z, A, m) components
+//!
+//! Examples: "U235" -> (92,235,0), "Am242_m1" -> (95,242,1)
+//! \param[in] name GNDS-format nuclide name
+//! \param[out] Z Atomic number
+//! \param[out] A Mass number
+//! \param[out] m Metastable state number
+//! \return true if parsing succeeded
+bool parse_gnds_nuclide(std::string_view name, int& Z, int& A, int& m);
+
 } // namespace openmc
 
 #endif // OPENMC_PARTICLE_TYPE_H

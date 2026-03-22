@@ -3,111 +3,22 @@
 
 #include "openmc/chain.h"
 
-#include <algorithm> // for sort
-#include <cctype>    // for isupper, islower, isdigit
-#include <cstdlib>   // for getenv
-#include <memory>    // for make_unique
-#include <numeric>   // for iota
-#include <queue>     // for priority_queue
-#include <string>    // for stod, stoi
-#include <tuple>     // for tuple
+#include <cstdlib> // for getenv
+#include <memory>  // for make_unique
+#include <queue>   // for priority_queue
+#include <string>  // for stod, stoi
+#include <tuple>   // for tuple
 
 #include <fmt/core.h>
 #include <pugixml.hpp>
 
 #include "openmc/distribution.h" // for distribution_from_xml
 #include "openmc/error.h"
+#include "openmc/particle_type.h" // for parse_gnds_nuclide
 #include "openmc/reaction.h"
 #include "openmc/xml_interface.h" // for get_node_value
 
 namespace openmc {
-
-namespace {
-
-//==============================================================================
-// ZAM parsing utilities (local to this translation unit)
-//==============================================================================
-
-constexpr const char* ATOMIC_SYMBOL[] = {"", "H", "He", "Li", "Be", "B", "C",
-  "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
-  "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As",
-  "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd",
-  "Ag", "Cd", "In", "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr",
-  "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf",
-  "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At",
-  "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
-  "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg",
-  "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og"};
-
-constexpr int MAX_Z =
-  static_cast<int>(sizeof(ATOMIC_SYMBOL) / sizeof(ATOMIC_SYMBOL[0])) - 1;
-
-//! Parse a GNDS nuclide name into (Z, A, m) components
-//!
-//! Examples: "U235" -> (92,235,0), "Am242_m1" -> (95,242,1)
-//! \param[in] name GNDS-format nuclide name
-//! \param[out] Z Atomic number
-//! \param[out] A Mass number
-//! \param[out] m Metastable state number
-//! \return true if parsing succeeded
-bool parse_gnds_nuclide(const std::string& name, int& Z, int& A, int& m)
-{
-  if (name.empty())
-    return false;
-
-  size_t pos = 0;
-  if (!std::isupper(static_cast<unsigned char>(name[pos])))
-    return false;
-
-  // Extract element symbol (1-2 chars)
-  std::string symbol;
-  symbol += name[pos++];
-  if (pos < name.size() &&
-      std::islower(static_cast<unsigned char>(name[pos]))) {
-    symbol += name[pos++];
-  }
-
-  // Extract mass number
-  if (pos >= name.size() ||
-      !std::isdigit(static_cast<unsigned char>(name[pos])))
-    return false;
-
-  size_t a_start = pos;
-  while (
-    pos < name.size() && std::isdigit(static_cast<unsigned char>(name[pos])))
-    ++pos;
-  A = std::stoi(name.substr(a_start, pos - a_start));
-
-  // Extract metastable state
-  m = 0;
-  if (pos < name.size()) {
-    if (name[pos] != '_' || pos + 2 >= name.size() || name[pos + 1] != 'm')
-      return false;
-    pos += 2;
-    size_t m_start = pos;
-    while (
-      pos < name.size() && std::isdigit(static_cast<unsigned char>(name[pos])))
-      ++pos;
-    if (m_start == pos)
-      return false;
-    m = std::stoi(name.substr(m_start, pos - m_start));
-  }
-
-  if (pos != name.size())
-    return false;
-
-  // Look up atomic number from symbol
-  Z = 0;
-  for (int z = 1; z <= MAX_Z; ++z) {
-    if (symbol == ATOMIC_SYMBOL[z]) {
-      Z = z;
-      break;
-    }
-  }
-  return Z != 0;
-}
-
-} // anonymous namespace
 
 //==============================================================================
 // ChainNuclide implementation
