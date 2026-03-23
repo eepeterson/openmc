@@ -6,20 +6,25 @@ transport solver by using user-provided multigroup fluxes and cross sections.
 """
 
 from __future__ import annotations
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 import copy
+import math
+import time
+from itertools import repeat
+from numbers import Real
 
 import numpy as np
 from uncertainties import ufloat
 
 import openmc
-from openmc.checkvalue import check_type
+from openmc.checkvalue import check_type, check_greater_than
 from openmc.mpi import comm
 from .abc import ReactionRateHelper, OperatorResult
 from .openmc_operator import OpenMCOperator
 from .pool import _distribute
 from .microxs import MicroXS
 from .results import Results
+from .stepresult import StepResult
 from .helpers import ChainFissionHelper, ConstantFissionYieldHelper, SourceRateHelper
 
 
@@ -414,6 +419,125 @@ class IndependentOperator(OpenMCOperator):
 
         op_result = OperatorResult(keff, rates)
         return copy.deepcopy(op_result)
+
+    def deplete(self, timesteps, source_rates=None, power=None,
+                power_density=None, timestep_units='s', order=48,
+                output=True, path='depletion_results.h5'):
+        """Run a full predictor depletion calculation using C++ CRAM solver.
+
+        This method performs a first-order predictor integration over the
+        given timesteps, using the C++ IPF CRAM solver with OpenMP
+        parallelism across materials. It replaces the need to create a
+        separate :class:`~openmc.deplete.PredictorIntegrator` and call
+        its :meth:`integrate` method.
+
+        Parameters
+        ----------
+        timesteps : iterable of float or iterable of tuple
+            Array of timesteps. Note that values are not cumulative. The
+            units are specified by the `timestep_units` argument when
+            `timesteps` is an iterable of float. Alternatively, units can
+            be specified for each step by passing an iterable of
+            (value, unit) tuples.
+        source_rates : float or iterable of float, optional
+            Source rate in [neutron/sec] or [W] for each interval.
+        power : float or iterable of float, optional
+            Power of the reactor in [W].
+        power_density : float or iterable of float, optional
+            Power density in [W/gHM].
+        timestep_units : str, optional
+            Units for timestep values. Default is 's'.
+        order : int, optional
+            CRAM approximation order (16 or 48). Default is 48.
+        output : bool, optional
+            Whether to display progress information. Default is True.
+        path : PathLike, optional
+            Path to file to write depletion results. Default is
+            'depletion_results.h5'.
+
+        """
+        from openmc.lib.deplete import cram_solve_batch
+
+        # Determine source rates from power/power_density/source_rates
+        if power is not None:
+            source_rates = power
+        elif power_density is not None:
+            if not isinstance(power_density, Iterable):
+                source_rates = power_density * self.heavy_metal
+            else:
+                source_rates = [p * self.heavy_metal for p in power_density]
+        elif source_rates is None:
+            raise ValueError(
+                "One of source_rates, power, or power_density must be set")
+
+        # Normalize timesteps to seconds and source_rates to array
+        if not isinstance(source_rates, Sequence):
+            source_rates = [source_rates] * len(timesteps)
+
+        if isinstance(timesteps[0], Sequence):
+            times, units = zip(*timesteps)
+        else:
+            times = timesteps
+            units = [timestep_units] * len(timesteps)
+
+        _SECONDS = {'s': 1, 'sec': 1, 'min': 60, 'minute': 60,
+                     'h': 3600, 'hr': 3600, 'hour': 3600,
+                     'd': 86400, 'day': 86400,
+                     'a': 31557600, 'year': 31557600}
+
+        seconds = []
+        for ts, unit in zip(times, units):
+            check_type('timestep', ts, Real)
+            check_greater_than('timestep', ts, 0.0, False)
+            factor = _SECONDS.get(unit)
+            if factor is None:
+                raise ValueError(f"Invalid timestep unit '{unit}'")
+            seconds.append(ts * factor)
+
+        # Initialize compositions
+        n = self.initial_condition()
+        t = 0.0
+
+        for i, (dt, source_rate) in enumerate(zip(seconds, source_rates)):
+            if output:
+                print(f"[openmc.deplete] t={t} s, dt={dt} s, "
+                      f"source={source_rate}")
+
+            # Get reaction rates from operator
+            res = self(n, source_rate)
+
+            # Form depletion matrices for each material
+            fission_yields = self.chain.fission_yields
+            if len(fission_yields) == 1:
+                fy_iter = repeat(fission_yields[0])
+            else:
+                fy_iter = iter(fission_yields)
+
+            matrices = [self.chain.form_matrix(rates, fy)
+                        for rates, fy in zip(res.rates, fy_iter)]
+
+            # Determine if this is a pure-decay step (zero source rate)
+            decay_only = (source_rate == 0.0)
+
+            # Solve all materials in parallel via C++
+            start = time.time()
+            n_end = cram_solve_batch(matrices, n, dt, order=order,
+                                     decay_only=decay_only)
+            proc_time = time.time() - start
+
+            # Save results
+            StepResult.save(self, n, res, [t, t + dt], source_rate, i,
+                            proc_time, path=path)
+
+            n = n_end
+            t += dt
+
+        # Final operator evaluation
+        if output:
+            print(f"[openmc.deplete] t={t} (final operator evaluation)")
+        res_final = self(n, source_rate)
+        StepResult.save(self, n, res_final, [t, t], source_rate,
+                        len(seconds), proc_time, path=path)
 
     def _update_materials(self):
         """Updates material compositions in OpenMC on all processes."""

@@ -172,6 +172,35 @@ private:
   void prepare_decay(const CSCMatrix& A_decay);
 };
 
+//==============================================================================
+// Batch solve interface (for calling from C API with OpenMP parallelism)
+//==============================================================================
+
+//! Solve multiple independent Bateman systems in parallel using OpenMP.
+//!
+//! Each system is described by a CSC matrix packed into contiguous arrays.
+//! The systems may have different dimensions (though in practice depletion
+//! matrices from the same chain are all the same size). Each OpenMP thread
+//! owns its own IPFCramSolver instance to avoid data races on mutable
+//! factorization workspace.
+//!
+//! \param n_systems     Number of independent systems to solve
+//! \param order         CRAM order: 16 or 48
+//! \param dimensions    Matrix dimension for each system [n_systems]
+//! \param indptr_offsets Offset into all_indptr for each system [n_systems+1]
+//! \param all_indptr    Concatenated column pointer arrays
+//! \param indices_offsets Offset into all_indices/all_data for each system
+//! [n_systems+1] \param all_indices   Concatenated row index arrays \param
+//! all_data      Concatenated value arrays \param n0_offsets    Offset into
+//! all_n0/all_results for each system [n_systems+1] \param all_n0 Concatenated
+//! initial composition vectors \param dt            Time step [s] (same for all
+//! systems) \param decay_only    If true, use solve_decay() for all systems
+//! \param all_results   Output: concatenated result vectors [sum of dimensions]
+void cram_solve_batch(int n_systems, int order, const int* dimensions,
+  const int* indptr_offsets, const int* all_indptr, const int* indices_offsets,
+  const int* all_indices, const double* all_data, const int* n0_offsets,
+  const double* all_n0, double dt, bool decay_only, double* all_results);
+
 } // namespace openmc
 
 #endif // OPENMC_BATEMAN_SOLVERS_H

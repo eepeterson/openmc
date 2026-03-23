@@ -7,6 +7,10 @@
 #include <complex>
 #include <queue>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "openmc/error.h"
 
 namespace openmc {
@@ -612,7 +616,8 @@ vector<double> IPFCramSolver::solve_decay(
         int row = decay_lt_rowidx_[lp];
         double a_val = decay_lt_data_[lp] * dt;
         // x[row] -= A'[row,j]*dt * x[j]
-        x_[row] -= std::complex<double>(a_val * x_[j].real(), a_val * x_[j].imag());
+        x_[row] -=
+          std::complex<double>(a_val * x_[j].real(), a_val * x_[j].imag());
       }
     }
 
@@ -632,4 +637,97 @@ vector<double> IPFCramSolver::solve_decay(
   return result;
 }
 
+//==============================================================================
+// Batch solve with OpenMP parallelism
+//==============================================================================
+
+void cram_solve_batch(int n_systems, int order, const int* dimensions,
+  const int* indptr_offsets, const int* all_indptr, const int* indices_offsets,
+  const int* all_indices, const double* all_data, const int* n0_offsets,
+  const double* all_n0, double dt, bool decay_only, double* all_results)
+{
+  auto cram_order =
+    (order == 16) ? IPFCramSolver::Order::cram16 : IPFCramSolver::Order::cram48;
+
+  // Create one solver per thread (each has its own mutable workspace)
+  int n_threads = 1;
+#ifdef _OPENMP
+  n_threads = omp_get_max_threads();
+#endif
+  vector<IPFCramSolver> solvers;
+  solvers.reserve(n_threads);
+  for (int t = 0; t < n_threads; ++t) {
+    solvers.emplace_back(cram_order);
+  }
+
+#pragma omp parallel for schedule(dynamic)
+  for (int i = 0; i < n_systems; ++i) {
+    int tid = 0;
+#ifdef _OPENMP
+    tid = omp_get_thread_num();
+#endif
+    auto& solver = solvers[tid];
+
+    int n = dimensions[i];
+
+    // Reconstruct CSC matrix from packed arrays
+    int ip_start = indptr_offsets[i];
+    int ix_start = indices_offsets[i];
+    int ip_len = n + 1;
+    int nnz = all_indptr[ip_start + n] - all_indptr[ip_start];
+
+    vector<int> indptr(all_indptr + ip_start, all_indptr + ip_start + ip_len);
+    // Shift indptr so it starts at 0 (it was stored with absolute offsets)
+    int base = indptr[0];
+    if (base != 0) {
+      for (auto& v : indptr)
+        v -= base;
+    }
+
+    vector<int> indices(all_indices + ix_start, all_indices + ix_start + nnz);
+    vector<double> data(all_data + ix_start, all_data + ix_start + nnz);
+
+    CSCPattern pattern(n, std::move(indptr), vector<int>(indices));
+    CSCMatrix A(std::move(pattern), std::move(data));
+
+    // Get initial composition
+    int n0_start = n0_offsets[i];
+    vector<double> n0(all_n0 + n0_start, all_n0 + n0_start + n);
+
+    // Solve
+    vector<double> result;
+    if (decay_only) {
+      result = solver.solve_decay(A, n0, dt);
+    } else {
+      result = solver.solve(A, n0, dt);
+    }
+
+    // Copy result to output
+    std::copy(result.begin(), result.end(), all_results + n0_start);
+  }
+}
+
 } // namespace openmc
+
+//==============================================================================
+// C API
+//==============================================================================
+
+using namespace openmc;
+
+extern "C" int openmc_cram_solve_batch(int n_systems, int order,
+  const int* dimensions, const int* indptr_offsets, const int* all_indptr,
+  const int* indices_offsets, const int* all_indices, const double* all_data,
+  const int* n0_offsets, const double* all_n0, double dt, bool decay_only,
+  double* all_results)
+{
+  try {
+    cram_solve_batch(n_systems, order, dimensions, indptr_offsets, all_indptr,
+      indices_offsets, all_indices, all_data, n0_offsets, all_n0, dt,
+      decay_only, all_results);
+  } catch (const std::exception& e) {
+    set_errmsg(e.what());
+    return OPENMC_E_UNASSIGNED;
+  }
+  return 0;
+}

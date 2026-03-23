@@ -320,6 +320,12 @@ int openmc_properties_export(const char* filename);
 // \return Error code
 int openmc_properties_import(const char* filename);
 
+// Batch Bateman solve using CRAM with OpenMP parallelism
+int openmc_cram_solve_batch(int n_systems, int order, const int* dimensions,
+  const int* indptr_offsets, const int* all_indptr, const int* indices_offsets,
+  const int* all_indices, const double* all_data, const int* n0_offsets,
+  const double* all_n0, double dt, bool decay_only, double* all_results);
+
 // Error codes
 extern int OPENMC_E_UNASSIGNED;
 extern int OPENMC_E_ALLOCATE;
