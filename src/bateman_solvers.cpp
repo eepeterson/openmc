@@ -3,8 +3,8 @@
 
 #include "openmc/bateman_solvers.h"
 
-#include <algorithm> // for fill, max, swap
-#include <cmath>     // for abs
+#include <algorithm> // for sort
+#include <complex>
 
 #include "openmc/error.h"
 
@@ -137,21 +137,25 @@ vector<double> IPFCramSolver::solve(
     symbolic_factorize(solve_pattern_);
   }
 
-  // Initialize result: y = alpha0 * n0
-  vector<double> y(n);
-  for (int i = 0; i < n; ++i) {
-    y[i] = alpha0_ * n0[i];
-  }
+  // IPF CRAM iteration:
+  //   y_0 = n0
+  //   y_{k+1} = y_k + 2*Re(alpha_k * (A*dt - theta_k*I)^{-1} * y_k)
+  //   result = alpha0 * y_final
+  vector<double> y(n0.begin(), n0.end());
 
-  // For each pole pair: solve (A*dt - theta_j*I) x = n0, accumulate
   for (int p = 0; p < n_poles_; ++p) {
     numeric_factorize(A, dt, theta_[p]);
-    triangular_solve(n0, x_);
+    triangular_solve(y, x_);
 
-    // y += 2 * Re(alpha_j * x_j)
+    // y += 2 * Re(alpha_p * x_p)
     for (int i = 0; i < n; ++i) {
       y[i] += 2.0 * std::real(alpha_[p] * x_[i]);
     }
+  }
+
+  // Final scaling
+  for (int i = 0; i < n; ++i) {
+    y[i] *= alpha0_;
   }
 
   return y;
@@ -160,9 +164,18 @@ vector<double> IPFCramSolver::solve(
 //==============================================================================
 // Symbolic factorization
 //
-// Computes the elimination tree and determines the nonzero structure of
-// L and U factors for a given sparsity pattern. This is the expensive
-// analysis step that is cached across calls with the same pattern.
+// Computes the exact L/U sparsity patterns for left-looking column LU
+// factorization without pivoting. The CRAM complex diagonal shift
+// guarantees |Im(theta)| >= 1.194 for all poles, making the diagonal
+// entry always the largest in magnitude in its column and eliminating the
+// need for pivoting. This means the L/U patterns are deterministic and
+// identical across all poles.
+//
+// Algorithm: symbolic left-looking factorization with worklist-based fill
+// propagation. For each column j, start with the structural nonzeros of
+// the input pattern, then propagate fill through previously computed L
+// column patterns. Any row k < j that becomes nonzero (a U entry) triggers
+// examination of L[:,k]'s rows, which may create additional fill.
 //==============================================================================
 
 void IPFCramSolver::symbolic_factorize(const CSCPattern& pattern)
@@ -171,126 +184,87 @@ void IPFCramSolver::symbolic_factorize(const CSCPattern& pattern)
   const auto& indptr = pattern.indptr();
   const auto& indices = pattern.indices();
 
-  // --- Step 1: Compute elimination tree using row-merge algorithm ---
-  // For each column j, etree_[j] = min row index > j in L[:,j]
-  // which corresponds to the parent of j in the elimination tree.
-  etree_.assign(n, -1);
-  vector<int> ancestor(n, -1);
-
-  for (int j = 0; j < n; ++j) {
-    for (int idx = indptr[j]; idx < indptr[j + 1]; ++idx) {
-      int i = indices[idx];
-      if (i >= j)
-        continue; // only look at upper part (row < col)
-
-      // Walk from i to root of current tree, finding j's parent
-      int r = i;
-      while (ancestor[r] != -1 && ancestor[r] != j) {
-        int next = ancestor[r];
-        ancestor[r] = j; // path compression
-        r = next;
-      }
-      if (ancestor[r] == -1) {
-        ancestor[r] = j;
-        etree_[r] = j;
-      }
-    }
-  }
-
-  // --- Step 2: Compute column counts for L and U ---
-  // L nonzeros per column: for column j of L, the nonzeros below the diagonal
-  // include rows reachable through the elimination tree from A's column j.
-  // U nonzeros per row (stored by column in CSC): entries above diagonal.
-
-  // Use symbolic Cholesky-like analysis adapted for unsymmetric LU.
-  // For left-looking LU without pivoting, L[:,j] has nonzeros in rows
-  // that are reachable from the pattern of A[:,j] through the elimination tree.
-
-  // Compute the row structure of each column of L and U
-  vector<vector<int>> l_cols(n); // rows of L[:,j] (below diagonal, excluding j)
-  vector<vector<int>> u_cols(n); // rows of U[:,j] (above diagonal, including j)
-
+  // Build L and U fill patterns column by column
+  vector<vector<int>> l_cols(n);
   vector<bool> marked(n, false);
-  vector<int> stack;
+  vector<int> u_work, l_work;
+
+  // Temporary storage for U column patterns (needed for CSC construction)
+  vector<vector<int>> u_cols(n);
 
   for (int j = 0; j < n; ++j) {
-    // Mark all rows reachable from A[:,j] through the elimination tree
-    stack.clear();
+    u_work.clear();
+    l_work.clear();
 
-    for (int idx = indptr[j]; idx < indptr[j + 1]; ++idx) {
-      int i = indices[idx];
-      if (i == j) {
-        // Diagonal always present in U
+    // Scatter: mark off-diagonal nonzero rows of column j
+    for (int p = indptr[j]; p < indptr[j + 1]; ++p) {
+      int i = indices[p];
+      if (i == j)
         continue;
-      }
-
-      // Walk up the elimination tree from i until we hit j or an
-      // already-marked node
-      int r = i;
-      int stack_start = stack.size();
-      while (r != -1 && r < j && !marked[r]) {
-        stack.push_back(r);
-        marked[r] = true;
-        r = etree_[r];
-      }
-
-      // All nodes on the path contribute to U[r,j] (r < j) or L[i,j] (i > j)
-      if (i > j && !marked[i]) {
+      if (!marked[i]) {
         marked[i] = true;
-        stack.push_back(i);
+        if (i < j)
+          u_work.push_back(i);
+        else
+          l_work.push_back(i);
       }
     }
 
-    // Separate into L and U contributions
-    for (int r : stack) {
-      if (r < j) {
-        u_cols[j].push_back(r); // U[r,j]
-      } else {
-        l_cols[j].push_back(r); // L[r,j]
+    // Propagate fill through L columns of above-diagonal entries.
+    // u_work grows as new above-diagonal rows are discovered via fill.
+    for (size_t idx = 0; idx < u_work.size(); ++idx) {
+      int k = u_work[idx];
+      for (int row : l_cols[k]) {
+        if (row == j)
+          continue; // diagonal, skip
+        if (!marked[row]) {
+          marked[row] = true;
+          if (row < j)
+            u_work.push_back(row);
+          else
+            l_work.push_back(row);
+        }
       }
-      marked[r] = false; // reset for next column
     }
 
-    // Sort rows within each column
-    std::sort(u_cols[j].begin(), u_cols[j].end());
-    std::sort(l_cols[j].begin(), l_cols[j].end());
+    // Sort row indices and store
+    std::sort(u_work.begin(), u_work.end());
+    std::sort(l_work.begin(), l_work.end());
+    u_cols[j] = u_work;
+    l_cols[j] = l_work;
 
-    // Diagonal always in U
-    u_cols[j].push_back(j);
+    // Clear marked flags
+    for (int k : u_work)
+      marked[k] = false;
+    for (int i : l_work)
+      marked[i] = false;
   }
 
-  // --- Step 3: Build L and U CSCPatterns ---
-  {
-    vector<int> l_indptr(n + 1, 0);
-    vector<int> l_indices;
-    for (int j = 0; j < n; ++j) {
-      l_indptr[j] = static_cast<int>(l_indices.size());
-      for (int r : l_cols[j]) {
-        l_indices.push_back(r);
-      }
-    }
-    l_indptr[n] = static_cast<int>(l_indices.size());
-    l_pattern_ = CSCPattern(n, std::move(l_indptr), std::move(l_indices));
+  // Build L CSC-style index arrays
+  l_indptr_.resize(n + 1);
+  l_rowidx_.clear();
+  for (int j = 0; j < n; ++j) {
+    l_indptr_[j] = static_cast<int>(l_rowidx_.size());
+    for (int r : l_cols[j])
+      l_rowidx_.push_back(r);
   }
+  l_indptr_[n] = static_cast<int>(l_rowidx_.size());
 
-  {
-    vector<int> u_indptr(n + 1, 0);
-    vector<int> u_indices;
-    for (int j = 0; j < n; ++j) {
-      u_indptr[j] = static_cast<int>(u_indices.size());
-      for (int r : u_cols[j]) {
-        u_indices.push_back(r);
-      }
-    }
-    u_indptr[n] = static_cast<int>(u_indices.size());
-    u_pattern_ = CSCPattern(n, std::move(u_indptr), std::move(u_indices));
+  // Build U CSC-style index arrays (diagonal stored as last entry per column)
+  u_indptr_.resize(n + 1);
+  u_rowidx_.clear();
+  for (int j = 0; j < n; ++j) {
+    u_indptr_[j] = static_cast<int>(u_rowidx_.size());
+    for (int r : u_cols[j])
+      u_rowidx_.push_back(r);
+    u_rowidx_.push_back(j); // diagonal last
   }
+  u_indptr_[n] = static_cast<int>(u_rowidx_.size());
 
-  // --- Step 4: Allocate numeric workspace ---
-  l_data_.resize(l_pattern_.nnz());
-  u_data_.resize(u_pattern_.nnz());
-  piv_.resize(n);
-  inv_piv_.resize(n);
+  // Allocate numeric workspace
+  l_data_.resize(l_rowidx_.size());
+  u_data_.resize(u_rowidx_.size());
+  u_diag_.resize(n);
   work_.resize(n);
   x_.resize(n);
 }
@@ -298,9 +272,14 @@ void IPFCramSolver::symbolic_factorize(const CSCPattern& pattern)
 //==============================================================================
 // Numeric factorization
 //
-// Left-looking column LU factorization with partial pivoting.
-// Forms the shifted matrix M = A*dt - theta*I on-the-fly (no temporary
-// complex matrix is constructed).
+// Left-looking column LU factorization without pivoting.
+// Forms the shifted matrix M = A*dt - theta*I on-the-fly.
+//
+// For each column j, the above-diagonal U rows (stored in ascending order
+// in u_rowidx_) serve as the left-looking schedule: each k < j with
+// U[k,j] != 0 triggers a rank-1 update w -= L[:,k] * U[k,j]. Processing
+// in ascending order naturally performs the forward substitution that
+// resolves fill-in dependencies between earlier columns.
 //==============================================================================
 
 void IPFCramSolver::numeric_factorize(
@@ -314,24 +293,9 @@ void IPFCramSolver::numeric_factorize(
   const auto& sp_indptr = solve_pattern_.indptr();
   const auto& sp_indices = solve_pattern_.indices();
 
-  const auto& l_indptr = l_pattern_.indptr();
-  const auto& l_indices = l_pattern_.indices();
-  const auto& u_indptr = u_pattern_.indptr();
-  const auto& u_indices = u_pattern_.indices();
-
-  // Initialize pivot as identity
-  for (int i = 0; i < n; ++i) {
-    piv_[i] = i;
-    inv_piv_[i] = i;
-  }
-
-  // Zero workspace
-  std::fill(work_.begin(), work_.end(), std::complex<double>(0.0, 0.0));
-
   for (int j = 0; j < n; ++j) {
-    // --- Scatter M[:,j] = A[:,j]*dt - theta*delta(i,j) into workspace ---
-    // Use the solve pattern (A's pattern + forced diagonal) to determine
-    // which entries to scatter. Match against A's actual entries.
+
+    // --- Step 1: Scatter M[:,j] = A[:,j]*dt - theta*I[:,j] ---
     {
       int a_pos = a_indptr[j];
       int a_end = a_indptr[j + 1];
@@ -340,13 +304,11 @@ void IPFCramSolver::numeric_factorize(
         int row = sp_indices[sp_pos];
         std::complex<double> val(0.0, 0.0);
 
-        // Check if A has this entry
         if (a_pos < a_end && a_indices[a_pos] == row) {
           val = dt * a_data[a_pos];
           ++a_pos;
         }
 
-        // Subtract theta on diagonal
         if (row == j) {
           val -= theta;
         }
@@ -355,82 +317,35 @@ void IPFCramSolver::numeric_factorize(
       }
     }
 
-    // --- Apply previous L columns (left-looking update) ---
-    // For each k < j where U[k,j] is nonzero, subtract L[:,k] * U[k,j]
-    for (int u_pos = u_indptr[j]; u_pos < u_indptr[j + 1]; ++u_pos) {
-      int k = u_indices[u_pos];
-      if (k >= j)
-        break; // only process k < j
+    // --- Step 2: Left-looking updates ---
+    // Process U[:,j] rows in ascending order (forward substitution).
+    // Each k < j with U[k,j] != 0 subtracts L[:,k] * U[k,j].
+    for (int up = u_indptr_[j]; up < u_indptr_[j + 1] - 1; ++up) {
+      int k = u_rowidx_[up];
+      std::complex<double> ukj = work_[k];
+      u_data_[up] = ukj;
 
-      // U[k,j] = work[piv[k]] (pivoted row k)
-      std::complex<double> ukj = work_[piv_[k]];
-      u_data_[u_pos] = ukj;
-
-      if (std::abs(ukj) == 0.0)
-        continue;
-
-      // Subtract L[:,k] * U[k,j] from work
-      for (int l_pos = l_indptr[k]; l_pos < l_indptr[k + 1]; ++l_pos) {
-        int row = l_indices[l_pos];
-        work_[piv_[row]] -= l_data_[l_pos] * ukj;
+      for (int lp = l_indptr_[k]; lp < l_indptr_[k + 1]; ++lp) {
+        work_[l_rowidx_[lp]] -= l_data_[lp] * ukj;
       }
     }
 
-    // --- Partial pivoting: find max magnitude below diagonal ---
-    {
-      double max_abs = 0.0;
-      int max_row = j;
-      for (int l_pos = l_indptr[j]; l_pos < l_indptr[j + 1]; ++l_pos) {
-        int row = l_indices[l_pos];
-        double abs_val = std::abs(work_[piv_[row]]);
-        if (abs_val > max_abs) {
-          max_abs = abs_val;
-          max_row = row;
-        }
-      }
-      // Also consider diagonal
-      double diag_abs = std::abs(work_[piv_[j]]);
-      if (diag_abs >= max_abs) {
-        max_row = j;
-      }
+    // --- Step 3: Extract diagonal and L column ---
+    u_diag_[j] = work_[j];
+    u_data_[u_indptr_[j + 1] - 1] = work_[j];
 
-      // Swap pivot entries if needed
-      if (max_row != j) {
-        std::swap(piv_[j], piv_[max_row]);
-        inv_piv_[piv_[j]] = j;
-        inv_piv_[piv_[max_row]] = max_row;
-      }
+    std::complex<double> inv_ujj = 1.0 / work_[j];
+    for (int lp = l_indptr_[j]; lp < l_indptr_[j + 1]; ++lp) {
+      l_data_[lp] = work_[l_rowidx_[lp]] * inv_ujj;
     }
 
-    // --- Store U[j,j] (diagonal of U, after pivoting) ---
-    {
-      // Find the diagonal position in u_indices for column j
-      // It's the last entry since we put diagonal last during symbolic
-      int u_diag_pos = u_indptr[j + 1] - 1;
-      u_data_[u_diag_pos] = work_[piv_[j]];
+    // --- Step 4: Clear workspace ---
+    // Clear all positions in the predicted fill pattern (U + L + diagonal)
+    for (int up = u_indptr_[j]; up < u_indptr_[j + 1]; ++up) {
+      work_[u_rowidx_[up]] = {0.0, 0.0};
     }
-
-    // --- Compute and store L[:,j] = work / U[j,j] ---
-    {
-      std::complex<double> ujj = work_[piv_[j]];
-      if (std::abs(ujj) == 0.0) {
-        fatal_error("Zero pivot encountered in sparse LU factorization "
-                    "during CRAM solve");
-      }
-
-      for (int l_pos = l_indptr[j]; l_pos < l_indptr[j + 1]; ++l_pos) {
-        int row = l_indices[l_pos];
-        l_data_[l_pos] = work_[piv_[row]] / ujj;
-      }
-    }
-
-    // --- Clear workspace for this column ---
-    for (int sp_pos = sp_indptr[j]; sp_pos < sp_indptr[j + 1]; ++sp_pos) {
-      work_[sp_indices[sp_pos]] = {0.0, 0.0};
-    }
-    // Also clear any fill-in positions
-    for (int l_pos = l_indptr[j]; l_pos < l_indptr[j + 1]; ++l_pos) {
-      work_[piv_[l_indices[l_pos]]] = {0.0, 0.0};
+    for (int lp = l_indptr_[j]; lp < l_indptr_[j + 1]; ++lp) {
+      work_[l_rowidx_[lp]] = {0.0, 0.0};
     }
   }
 }
@@ -438,44 +353,33 @@ void IPFCramSolver::numeric_factorize(
 //==============================================================================
 // Triangular solve
 //
-// Solve LUx = Pb where P is the row permutation from pivoting.
-// First solve Ly = Pb (forward substitution), then Ux = y (back substitution).
+// Solve LUx = b without permutation (no pivoting means identity perm).
+// Forward substitution solves Lz = b, back substitution solves Ux = z.
 //==============================================================================
 
 void IPFCramSolver::triangular_solve(
   const vector<double>& b, vector<std::complex<double>>& x) const
 {
-  int n = solve_pattern_.n();
-  const auto& l_indptr = l_pattern_.indptr();
-  const auto& l_indices = l_pattern_.indices();
-  const auto& u_indptr = u_pattern_.indptr();
-  const auto& u_indices = u_pattern_.indices();
+  int n = static_cast<int>(u_diag_.size());
 
-  // Forward substitution: Ly = Pb
-  // y is stored in x temporarily
+  // Copy real RHS into complex vector
   for (int j = 0; j < n; ++j) {
-    x[j] = std::complex<double>(b[piv_[j]], 0.0);
+    x[j] = std::complex<double>(b[j], 0.0);
   }
 
+  // Forward substitution: Lz = b (L is unit lower triangular)
   for (int j = 0; j < n; ++j) {
-    // x[j] is already correct (L has unit diagonal)
-    // Update subsequent rows
-    for (int l_pos = l_indptr[j]; l_pos < l_indptr[j + 1]; ++l_pos) {
-      int row = l_indices[l_pos];
-      x[row] -= l_data_[l_pos] * x[j];
+    for (int lp = l_indptr_[j]; lp < l_indptr_[j + 1]; ++lp) {
+      x[l_rowidx_[lp]] -= l_data_[lp] * x[j];
     }
   }
 
-  // Back substitution: Ux = y
+  // Back substitution: Ux = z
   for (int j = n - 1; j >= 0; --j) {
-    // Divide by U[j,j] (last entry in U's column j)
-    int u_diag_pos = u_indptr[j + 1] - 1;
-    x[j] /= u_data_[u_diag_pos];
+    x[j] /= u_diag_[j];
 
-    // Update earlier rows
-    for (int u_pos = u_indptr[j]; u_pos < u_indptr[j + 1] - 1; ++u_pos) {
-      int row = u_indices[u_pos];
-      x[row] -= u_data_[u_pos] * x[j];
+    for (int up = u_indptr_[j]; up < u_indptr_[j + 1] - 1; ++up) {
+      x[u_rowidx_[up]] -= u_data_[up] * x[j];
     }
   }
 }

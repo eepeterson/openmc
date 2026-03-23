@@ -34,14 +34,18 @@ public:
 //==============================================================================
 //! IPF CRAM solver for the Bateman equations
 //!
-//! Implements the Incomplete Partial Factorization form of the Chebyshev
+//! Implements the Incomplete Partial Fraction form of the Chebyshev
 //! Rational Approximation Method (CRAM), as described in:
 //!   M. Pusa, "Higher-Order Chebyshev Rational Approximation Method and
 //!   Application to Burnup Equations," Nucl. Sci. Eng., 182:3, 297-318 (2016).
 //!
-//! The solver caches sparse LU symbolic analysis so that repeated calls with
-//! the same sparsity pattern reuse the elimination tree and nonzero structure.
-//! Partial pivoting is used for numerical stability with fissile chains.
+//! The solver caches L/U sparsity patterns so that repeated calls with the
+//! same matrix pattern skip symbolic analysis. The numeric factorization
+//! uses left-looking column LU without pivoting: the complex diagonal shift
+//! from each CRAM pole guarantees |Im(theta)| >= 1.194, ensuring the
+//! diagonal dominance needed for stable unpivoted factorization. This
+//! makes the L/U patterns identical across all poles, allowing a single
+//! symbolic phase to serve all 24 (CRAM48) or 8 (CRAM16) linear solves.
 //==============================================================================
 
 class IPFCramSolver : public BatemanSolver {
@@ -62,28 +66,28 @@ private:
   double alpha0_;                      //!< Limit at infinity
 
   // --- Cached symbolic factorization state ---
+
   //! Sparsity pattern used for the current factorization (A's pattern with
   //! forced diagonal entries). Compared against incoming matrices to detect
   //! when re-analysis is needed.
   CSCPattern solve_pattern_;
 
-  //! Elimination tree: parent[j] is the parent of column j in the
-  //! elimination tree, or -1 if j is a root.
-  vector<int> etree_;
+  //! L factor structure (CSC, unit lower triangular, diagonal not stored).
+  //! Row indices within each column are sorted in ascending order.
+  vector<int> l_indptr_; //!< Column pointers [n+1]
+  vector<int> l_rowidx_; //!< Row indices [l_nnz]
 
-  //! Sparsity patterns of L and U factors, computed during symbolic analysis.
-  //! L is unit lower triangular; U is upper triangular.
-  CSCPattern l_pattern_;
-  CSCPattern u_pattern_;
-
-  //! Column post-ordering for efficient elimination tree traversal
-  vector<int> post_order_;
+  //! U factor structure (CSC, including diagonal as last entry per column).
+  //! Above-diagonal row indices are sorted in ascending order, followed by
+  //! the diagonal entry. The ascending order of the above-diagonal rows
+  //! enables correct left-looking forward substitution.
+  vector<int> u_indptr_; //!< Column pointers [n+1]
+  vector<int> u_rowidx_; //!< Row indices [u_nnz]
 
   // --- Numeric factorization workspace (reused across poles) ---
   vector<std::complex<double>> l_data_; //!< L factor values [l_nnz]
   vector<std::complex<double>> u_data_; //!< U factor values [u_nnz]
-  vector<int> piv_;                     //!< Row permutation [n]
-  vector<int> inv_piv_;                 //!< Inverse row permutation [n]
+  vector<std::complex<double>> u_diag_; //!< U diagonal values [n]
 
   // --- Solve workspace ---
   vector<std::complex<double>> work_; //!< Dense workspace [n]
@@ -91,19 +95,20 @@ private:
 
   // --- Private methods ---
 
-  //! Perform symbolic analysis of the sparsity pattern to determine the
-  //! elimination tree and the nonzero structures of L and U.
+  //! Compute L/U sparsity patterns for the given matrix structure.
+  //! Uses a symbolic left-looking factorization with worklist-based fill
+  //! propagation through previously computed L column patterns.
   void symbolic_factorize(const CSCPattern& pattern);
 
   //! Numerically factorize the shifted complex matrix (A*dt - theta*I).
-  //! Uses the pre-computed symbolic structure. Includes partial pivoting.
+  //! Uses left-looking column LU without pivoting.
   //! \param A     Real transmutation matrix
   //! \param dt    Time step
   //! \param theta Complex pole (shift)
   void numeric_factorize(
     const CSCMatrix& A, double dt, std::complex<double> theta);
 
-  //! Solve the triangular system LUx = Pb using the current factorization.
+  //! Solve the triangular system LUx = b using the current factorization.
   //! \param b  Right-hand side (real-valued initial composition)
   //! \param x  Solution vector (complex-valued)
   void triangular_solve(
