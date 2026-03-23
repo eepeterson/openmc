@@ -5,6 +5,7 @@
 #define OPENMC_SPARSE_MATRIX_H
 
 #include <algorithm> // for sort, adjacent_find
+#include <complex>   // for complex
 #include <utility>   // for move
 
 #include "openmc/vector.h"
@@ -64,7 +65,7 @@ private:
 };
 
 //==============================================================================
-//! CSC sparse matrix (pattern + values)
+//! CSC sparse matrix with real (double) values
 //!
 //! Associates a double-precision value with each structural nonzero defined
 //! by the underlying CSCPattern.
@@ -102,6 +103,45 @@ public:
 private:
   CSCPattern pattern_;  //!< Structural pattern
   vector<double> data_; //!< Values [nnz]
+};
+
+//==============================================================================
+//! CSC sparse matrix with complex values
+//!
+//! Pairs a CSCPattern with complex double-precision values. Used internally
+//! by the CRAM solver for shifted linear systems.
+//==============================================================================
+
+class ComplexCSCMatrix {
+public:
+  // Constructors
+  ComplexCSCMatrix() = default;
+  ComplexCSCMatrix(CSCPattern pattern, vector<std::complex<double>> data)
+    : pattern_(std::move(pattern)), data_(std::move(data))
+  {}
+
+  //! Construct from a real CSCMatrix with given pattern (which may have
+  //! additional structural entries not in A, e.g. forced diagonal).
+  //! Real values from A are copied to matching positions; extra positions
+  //! in the target pattern are set to zero.
+  //! \param target_pattern Sparsity pattern for the result (superset of A)
+  //! \param A Source real matrix
+  //! \param scale Scalar multiplier applied to all values from A
+  static ComplexCSCMatrix from_real(
+    const CSCPattern& target_pattern, const CSCMatrix& A, double scale = 1.0);
+
+  // Accessors
+  int n() const { return pattern_.n(); }
+  int nnz() const { return pattern_.nnz(); }
+  const CSCPattern& pattern() const { return pattern_; }
+  const vector<int>& indptr() const { return pattern_.indptr(); }
+  const vector<int>& indices() const { return pattern_.indices(); }
+  const vector<std::complex<double>>& data() const { return data_; }
+  vector<std::complex<double>>& data() { return data_; }
+
+private:
+  CSCPattern pattern_;                //!< Structural pattern
+  vector<std::complex<double>> data_; //!< Values [nnz]
 };
 
 } // namespace openmc
