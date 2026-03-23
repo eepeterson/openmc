@@ -5,6 +5,7 @@
 
 #include <algorithm> // for sort
 #include <complex>
+#include <queue>
 
 #include "openmc/error.h"
 
@@ -408,6 +409,227 @@ void IPFCramSolver::triangular_solve(
       x[u_rowidx_[up]] -= fast_cmul(u_data_[up], x[j]);
     }
   }
+}
+
+//==============================================================================
+// Decay-specific preparation
+//
+// Computes a topological permutation of the decay matrix so that the
+// permuted matrix is strictly lower-triangular (plus diagonal). This is
+// always possible for radioactive decay: parents decay into daughters,
+// never the reverse. The permutation, inverse permutation, and permuted
+// lower-triangular structure are cached for reuse across solve_decay()
+// calls with the same matrix pattern.
+//
+// Uses Kahn's algorithm (BFS-based topological sort) on the column→row
+// edges of the CSC matrix. Ties are broken by processing lower-index
+// nodes first (via a min-heap), giving a deterministic ordering.
+//==============================================================================
+
+void IPFCramSolver::prepare_decay(const CSCMatrix& A_decay)
+{
+  int n = A_decay.n();
+  const auto& indptr = A_decay.indptr();
+  const auto& indices = A_decay.indices();
+  const auto& data = A_decay.data();
+
+  // Build in-degree counts from the off-diagonal structure.
+  // In the CSC decay matrix, a nonzero at (row, col) with row != col means
+  // col decays into row, i.e. col is a predecessor of row.
+  // In-degree of a node = number of predecessors feeding into it.
+  vector<int> in_degree(n, 0);
+  for (int col = 0; col < n; ++col) {
+    for (int p = indptr[col]; p < indptr[col + 1]; ++p) {
+      int row = indices[p];
+      if (row != col) {
+        ++in_degree[row];
+      }
+    }
+  }
+
+  // Kahn's algorithm with min-heap for deterministic ordering
+  std::priority_queue<int, std::vector<int>, std::greater<int>> pq;
+  for (int i = 0; i < n; ++i) {
+    if (in_degree[i] == 0) {
+      pq.push(i);
+    }
+  }
+
+  decay_perm_.clear();
+  decay_perm_.reserve(n);
+  while (!pq.empty()) {
+    int node = pq.top();
+    pq.pop();
+    decay_perm_.push_back(node);
+
+    // "Remove" this node: decrement in-degree of its successors
+    for (int p = indptr[node]; p < indptr[node + 1]; ++p) {
+      int row = indices[p];
+      if (row != node) {
+        if (--in_degree[row] == 0) {
+          pq.push(row);
+        }
+      }
+    }
+  }
+
+  // Build inverse permutation
+  decay_inv_perm_.resize(n);
+  for (int i = 0; i < n; ++i) {
+    decay_inv_perm_[decay_perm_[i]] = i;
+  }
+
+  // Build the permuted lower-triangular structure.
+  // After permutation, all off-diagonal entries should satisfy new_row >
+  // new_col (lower-triangular). We store these in CSC column-major order
+  // with sorted row indices, plus a separate diagonal array.
+  decay_diag_.assign(n, 0.0);
+
+  // First pass: count entries per new column
+  vector<int> col_counts(n, 0);
+  for (int old_col = 0; old_col < n; ++old_col) {
+    for (int p = indptr[old_col]; p < indptr[old_col + 1]; ++p) {
+      int old_row = indices[p];
+      int new_col = decay_inv_perm_[old_col];
+      int new_row = decay_inv_perm_[old_row];
+      if (new_row == new_col) {
+        decay_diag_[new_col] = data[p];
+      } else {
+        ++col_counts[new_col];
+      }
+    }
+  }
+
+  // Build column pointers
+  decay_lt_indptr_.resize(n + 1);
+  decay_lt_indptr_[0] = 0;
+  for (int j = 0; j < n; ++j) {
+    decay_lt_indptr_[j + 1] = decay_lt_indptr_[j] + col_counts[j];
+  }
+
+  // Second pass: fill row indices and values
+  int lt_nnz = decay_lt_indptr_[n];
+  decay_lt_rowidx_.resize(lt_nnz);
+  decay_lt_data_.resize(lt_nnz);
+  vector<int> col_pos(n, 0); // current write position per column
+
+  for (int old_col = 0; old_col < n; ++old_col) {
+    for (int p = indptr[old_col]; p < indptr[old_col + 1]; ++p) {
+      int old_row = indices[p];
+      int new_col = decay_inv_perm_[old_col];
+      int new_row = decay_inv_perm_[old_row];
+      if (new_row != new_col) {
+        int pos = decay_lt_indptr_[new_col] + col_pos[new_col]++;
+        decay_lt_rowidx_[pos] = new_row;
+        decay_lt_data_[pos] = data[p];
+      }
+    }
+  }
+
+  // Sort row indices within each column (and reorder data to match)
+  for (int j = 0; j < n; ++j) {
+    int start = decay_lt_indptr_[j];
+    int end = decay_lt_indptr_[j + 1];
+    int len = end - start;
+    if (len <= 1)
+      continue;
+
+    // Build index permutation for this column's entries
+    vector<int> order(len);
+    for (int i = 0; i < len; ++i)
+      order[i] = i;
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+      return decay_lt_rowidx_[start + a] < decay_lt_rowidx_[start + b];
+    });
+
+    // Apply permutation
+    vector<int> tmp_idx(len);
+    vector<double> tmp_val(len);
+    for (int i = 0; i < len; ++i) {
+      tmp_idx[i] = decay_lt_rowidx_[start + order[i]];
+      tmp_val[i] = decay_lt_data_[start + order[i]];
+    }
+    for (int i = 0; i < len; ++i) {
+      decay_lt_rowidx_[start + i] = tmp_idx[i];
+      decay_lt_data_[start + i] = tmp_val[i];
+    }
+  }
+
+  // Cache the pattern for change detection
+  decay_pattern_ = A_decay.pattern();
+
+  // Ensure workspace is large enough
+  if (static_cast<int>(x_.size()) < n) {
+    x_.resize(n);
+  }
+}
+
+//==============================================================================
+// Fast decay solve
+//
+// Exploits the lower-triangular structure of pure-decay matrices.
+// After topological permutation, (A'*dt - theta*I) is lower-triangular,
+// so each CRAM pole requires only a single O(nnz) forward substitution
+// — no LU factorization. This is dramatically faster than the general
+// solve() for decay-only steps.
+//==============================================================================
+
+vector<double> IPFCramSolver::solve_decay(
+  const CSCMatrix& A_decay, const vector<double>& n0, double dt)
+{
+  int n = A_decay.n();
+
+  // Recompute permutation if pattern changed
+  if (A_decay.pattern() != decay_pattern_) {
+    prepare_decay(A_decay);
+  }
+
+  // Permute n0 into topological order
+  vector<double> y(n);
+  for (int i = 0; i < n; ++i) {
+    y[i] = n0[decay_perm_[i]];
+  }
+
+  // IPF CRAM iteration in permuted space
+  for (int p = 0; p < n_poles_; ++p) {
+    auto theta_p = theta_[p];
+
+    // Copy permuted y into complex RHS
+    for (int j = 0; j < n; ++j) {
+      x_[j] = std::complex<double>(y[j], 0.0);
+    }
+
+    // Forward substitution on (A'*dt - theta*I) x = y
+    // A' is lower-triangular, so the shifted matrix is also lower-triangular.
+    // Process columns 0..n-1 in order: solve for x[j], then update rows below.
+    for (int j = 0; j < n; ++j) {
+      // Divide by diagonal: (A'[j,j]*dt - theta)
+      x_[j] = fast_cmul(x_[j],
+        fast_crecip({decay_diag_[j] * dt - theta_p.real(), -theta_p.imag()}));
+
+      // Subtract contribution from column j to rows below
+      for (int lp = decay_lt_indptr_[j]; lp < decay_lt_indptr_[j + 1]; ++lp) {
+        int row = decay_lt_rowidx_[lp];
+        double a_val = decay_lt_data_[lp] * dt;
+        // x[row] -= A'[row,j]*dt * x[j]
+        x_[row] -= std::complex<double>(a_val * x_[j].real(), a_val * x_[j].imag());
+      }
+    }
+
+    // y += 2 * Re(alpha_p * x_p)
+    for (int i = 0; i < n; ++i) {
+      auto ax = fast_cmul(alpha_[p], x_[i]);
+      y[i] += 2.0 * ax.real();
+    }
+  }
+
+  // Scale by alpha0 and permute back to original order
+  vector<double> result(n);
+  for (int i = 0; i < n; ++i) {
+    result[decay_perm_[i]] = y[i] * alpha0_;
+  }
+
+  return result;
 }
 
 } // namespace openmc

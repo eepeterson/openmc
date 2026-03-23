@@ -29,6 +29,23 @@ public:
   //! \return    Final atom densities [n]
   virtual vector<double> solve(
     const CSCMatrix& A, const vector<double>& n0, double dt) = 0;
+
+  //! Solve a pure-decay Bateman system.
+  //!
+  //! The decay matrix must have a DAG structure (no cycles), which is
+  //! always true for radioactive decay chains. The default implementation
+  //! falls back to the general solve(); subclasses may override with a
+  //! faster algorithm that exploits the lower-triangular structure.
+  //!
+  //! \param A_decay  Sparse decay-only transmutation matrix (n x n)
+  //! \param n0       Initial atom densities [n]
+  //! \param dt       Time interval [s]
+  //! \return         Final atom densities [n]
+  virtual vector<double> solve_decay(
+    const CSCMatrix& A_decay, const vector<double>& n0, double dt)
+  {
+    return solve(A_decay, n0, dt);
+  }
 };
 
 //==============================================================================
@@ -57,6 +74,16 @@ public:
 
   vector<double> solve(
     const CSCMatrix& A, const vector<double>& n0, double dt) override;
+
+  //! Fast pure-decay solver exploiting lower-triangular structure.
+  //!
+  //! On first call (or when the matrix pattern changes), computes a
+  //! topological permutation that makes the decay matrix lower-triangular.
+  //! Each CRAM pole then requires only a forward substitution — no LU
+  //! factorization. The permutation and permuted matrix structure are
+  //! cached for subsequent calls with the same pattern.
+  vector<double> solve_decay(
+    const CSCMatrix& A_decay, const vector<double>& n0, double dt) override;
 
 private:
   // --- CRAM coefficients ---
@@ -93,6 +120,31 @@ private:
   vector<std::complex<double>> work_; //!< Dense workspace [n]
   vector<std::complex<double>> x_;    //!< Complex solve result [n]
 
+  // --- Cached decay-specific state ---
+
+  //! Sparsity pattern of the last decay matrix (used to detect changes)
+  CSCPattern decay_pattern_;
+
+  //! Topological permutation: perm_[new_idx] = old_idx.
+  //! Reorders the decay matrix into strictly lower-triangular form.
+  vector<int> decay_perm_;
+
+  //! Inverse permutation: inv_perm_[old_idx] = new_idx.
+  vector<int> decay_inv_perm_;
+
+  //! Column pointers for the permuted lower-triangular decay matrix.
+  //! Only below-diagonal entries are stored (diagonal tracked separately).
+  vector<int> decay_lt_indptr_;
+
+  //! Row indices for the permuted lower-triangular decay matrix.
+  vector<int> decay_lt_rowidx_;
+
+  //! Values for the permuted lower-triangular decay matrix.
+  vector<double> decay_lt_data_;
+
+  //! Diagonal values of the permuted decay matrix.
+  vector<double> decay_diag_;
+
   // --- Private methods ---
 
   //! Compute L/U sparsity patterns for the given matrix structure.
@@ -113,6 +165,11 @@ private:
   //! \param x  Solution vector (complex-valued)
   void triangular_solve(
     const vector<double>& b, vector<std::complex<double>>& x) const;
+
+  //! Compute topological permutation and extract lower-triangular structure
+  //! from a decay matrix. Caches permutation and structure for reuse.
+  //! \param A_decay  Decay-only transmutation matrix
+  void prepare_decay(const CSCMatrix& A_decay);
 };
 
 } // namespace openmc
