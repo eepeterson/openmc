@@ -20,6 +20,14 @@ import openmc
 from openmc.checkvalue import check_type, check_greater_than
 from openmc.mpi import comm
 from .abc import ReactionRateHelper, OperatorResult
+
+# Time unit conversion factors to seconds
+_SECONDS_PER_UNIT = {
+    's': 1, 'sec': 1, 'min': 60, 'minute': 60,
+    'h': 3600, 'hr': 3600, 'hour': 3600,
+    'd': 86400, 'day': 86400,
+    'a': 31557600, 'year': 31557600
+}
 from .openmc_operator import OpenMCOperator
 from .pool import _distribute
 from .microxs import MicroXS
@@ -455,6 +463,14 @@ class IndependentOperator(OpenMCOperator):
             Path to file to write depletion results. Default is
             'depletion_results.h5'.
 
+        Raises
+        ------
+        ValueError
+            If none of source_rates, power, or power_density is provided,
+            or if an invalid timestep unit is given.
+        TypeError
+            If a timestep value is not a real number.
+
         """
         from openmc.lib.deplete import cram_solve_batch
         from scipy.sparse import csc_array
@@ -481,16 +497,11 @@ class IndependentOperator(OpenMCOperator):
             times = timesteps
             units = [timestep_units] * len(timesteps)
 
-        _SECONDS = {'s': 1, 'sec': 1, 'min': 60, 'minute': 60,
-                     'h': 3600, 'hr': 3600, 'hour': 3600,
-                     'd': 86400, 'day': 86400,
-                     'a': 31557600, 'year': 31557600}
-
         seconds = []
         for ts, unit in zip(times, units):
             check_type('timestep', ts, Real)
             check_greater_than('timestep', ts, 0.0, False)
-            factor = _SECONDS.get(unit)
+            factor = _SECONDS_PER_UNIT.get(unit)
             if factor is None:
                 raise ValueError(f"Invalid timestep unit '{unit}'")
             seconds.append(ts * factor)
@@ -558,12 +569,13 @@ class IndependentOperator(OpenMCOperator):
             t += dt
 
         # Final save
-        if output:
-            print(f"[openmc.deplete] t={t} (final)")
-        scaled_rates = base_res.rates * source_rate
-        res_final = OperatorResult(base_res.k, scaled_rates)
-        StepResult.save(self, n, res_final, [t, t], source_rate,
-                        len(seconds), proc_time, path=path)
+        if seconds:
+            if output:
+                print(f"[openmc.deplete] t={t} (final)")
+            scaled_rates = base_res.rates * source_rate
+            res_final = OperatorResult(base_res.k, scaled_rates)
+            StepResult.save(self, n, res_final, [t, t], source_rate,
+                            len(seconds), proc_time, path=path)
 
     def _update_materials(self):
         """Updates material compositions in OpenMC on all processes."""

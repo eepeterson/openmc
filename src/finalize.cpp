@@ -30,6 +30,7 @@
 #include "openmc/volume_calc.h"
 #include "openmc/weight_windows.h"
 
+#include "openmc/chain.h"
 #include "openmc/tensor.h"
 
 namespace openmc {
@@ -52,6 +53,8 @@ void free_memory()
   free_memory_bank();
   free_memory_plot();
   free_memory_weight_windows();
+  data::depletion_chain.reset();
+  data::chain_nuclide_map.clear();
   if (mpi::master) {
     free_memory_cmfd();
   }

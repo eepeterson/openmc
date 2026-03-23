@@ -133,7 +133,6 @@ void DepletionChain::load_xml(const std::string& filename)
   compute_topo_permutation();
   compute_decay_matrix();
   compute_bateman_pattern();
-  compute_descendants();
 }
 
 void DepletionChain::compute_topo_permutation()
@@ -283,42 +282,6 @@ void DepletionChain::compute_bateman_pattern()
   perm_bateman_pattern_ = bateman_pattern_.permute(topo_perm_);
 }
 
-void DepletionChain::compute_descendants()
-{
-  int n = nuclides_.size();
-
-  // Build reverse adjacency using the same edges as the Bateman pattern
-  // (excluding self-loops). desc[i] is the number of nuclides reachable
-  // from nuclide i (counting i itself).
-  vector<vector<int>> parents(n);
-
-  for (int i = 0; i < n; ++i) {
-    const auto& nuc = *nuclides_[i];
-    for (const auto& dm : nuc.decay_modes()) {
-      int j = nuclide_index(dm.target);
-      if (j >= 0)
-        parents[j].push_back(i);
-    }
-    for (const auto& rxn : nuc.transmutation_reactions()) {
-      int j = nuclide_index(rxn.target);
-      if (j >= 0)
-        parents[j].push_back(i);
-    }
-  }
-
-  // Process nuclides in reverse topological order (leaves first).
-  // descendants_[i] = 1 + sum of unique descendants reachable through children.
-  // For efficiency we use the count-based approach: each nuclide in topo order
-  // accumulates its descendant count upward.
-  descendants_.assign(n, 1); // count self
-  for (int k = n - 1; k >= 0; --k) {
-    int u = topo_perm_[k];
-    for (int p : parents[u]) {
-      descendants_[p] += descendants_[u];
-    }
-  }
-}
-
 //==============================================================================
 // Global variables
 //==============================================================================
@@ -326,7 +289,6 @@ void DepletionChain::compute_descendants()
 namespace data {
 
 std::unordered_map<std::string, int> chain_nuclide_map;
-vector<unique_ptr<ChainNuclide>> chain_nuclides;
 unique_ptr<DepletionChain> depletion_chain;
 
 } // namespace data
@@ -344,25 +306,13 @@ void read_chain_file_xml()
 
   write_message(5, "Reading chain file: {}...", chain_file_path);
 
-  // Load via DepletionChain (modern path)
+  // Load chain (DepletionChain owns all ChainNuclide instances)
   data::depletion_chain = make_unique<DepletionChain>();
   data::depletion_chain->load_xml(chain_file_path);
 
-  // Populate legacy globals for backward compatibility with transport code
-  int n = data::depletion_chain->size();
-  for (int i = 0; i < n; ++i) {
-    const auto& nuc = data::depletion_chain->nuclide(i);
-    data::chain_nuclide_map[nuc.name()] = i;
-  }
-
-  // Legacy chain_nuclides: re-parse from same file
-  // (needed because transport code holds unique_ptr<ChainNuclide> separately)
-  pugi::xml_document doc;
-  doc.load_file(chain_file_path);
-  pugi::xml_node root = doc.document_element();
-  for (auto node : root.children("nuclide")) {
-    data::chain_nuclides.push_back(std::make_unique<ChainNuclide>(node));
-  }
+  // Populate chain_nuclide_map for backward compatibility with transport
+  // code (D1S photon handling, parent nuclide tally filtering)
+  data::chain_nuclide_map = data::depletion_chain->nuclide_map();
 }
 
 } // namespace openmc

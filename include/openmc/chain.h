@@ -162,15 +162,11 @@ public:
     return perm_bateman_pattern_;
   }
 
-  //! Descendant count for each nuclide (reachable via any path)
-  const vector<int>& descendants() const { return descendants_; }
-
 private:
   // --- Computation helpers (called at end of load_xml) ---
   void compute_topo_permutation();
   void compute_decay_matrix();
   void compute_bateman_pattern();
-  void compute_descendants();
 
   // --- Data members ---
   vector<unique_ptr<ChainNuclide>> nuclides_;
@@ -181,7 +177,6 @@ private:
   CSCMatrix perm_decay_matrix_;
   CSCPattern bateman_pattern_;
   CSCPattern perm_bateman_pattern_;
-  vector<int> descendants_;
 };
 
 //==============================================================================
@@ -190,11 +185,11 @@ private:
 
 namespace data {
 
-// Legacy globals (kept for backward compatibility with transport code)
+// Map from nuclide name to index in depletion chain (used by transport
+// code for D1S photon handling and parent nuclide tally filtering)
 extern std::unordered_map<std::string, int> chain_nuclide_map;
-extern vector<unique_ptr<ChainNuclide>> chain_nuclides;
 
-// Modern interface
+// Depletion chain (owns all ChainNuclide instances)
 extern unique_ptr<DepletionChain> depletion_chain;
 
 } // namespace data
