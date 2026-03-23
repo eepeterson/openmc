@@ -10,6 +10,31 @@
 
 namespace openmc {
 
+namespace {
+
+// Fast complex reciprocal: 1/(a+bi) = (a-bi) / (a² + b²)
+// Avoids GCC's __divdc3 which includes NaN/Inf handling we don't need.
+// CRAM poles guarantee the diagonal is always well-conditioned.
+inline std::complex<double> fast_crecip(std::complex<double> z)
+{
+  double a = z.real();
+  double b = z.imag();
+  double denom = a * a + b * b;
+  return {a / denom, -b / denom};
+}
+
+// Fast complex multiply: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+// Avoids GCC's __muldc3 which includes NaN recovery we don't need.
+inline std::complex<double> fast_cmul(
+  std::complex<double> x, std::complex<double> y)
+{
+  double a = x.real(), b = x.imag();
+  double c = y.real(), d = y.imag();
+  return {a * c - b * d, a * d + b * c};
+}
+
+} // anonymous namespace
+
 //==============================================================================
 // CRAM coefficient tables
 //
@@ -149,7 +174,8 @@ vector<double> IPFCramSolver::solve(
 
     // y += 2 * Re(alpha_p * x_p)
     for (int i = 0; i < n; ++i) {
-      y[i] += 2.0 * std::real(alpha_[p] * x_[i]);
+      auto ax = fast_cmul(alpha_[p], x_[i]);
+      y[i] += 2.0 * ax.real();
     }
   }
 
@@ -326,17 +352,16 @@ void IPFCramSolver::numeric_factorize(
       u_data_[up] = ukj;
 
       for (int lp = l_indptr_[k]; lp < l_indptr_[k + 1]; ++lp) {
-        work_[l_rowidx_[lp]] -= l_data_[lp] * ukj;
+        work_[l_rowidx_[lp]] -= fast_cmul(l_data_[lp], ukj);
       }
     }
 
     // --- Step 3: Extract diagonal and L column ---
-    u_diag_[j] = work_[j];
+    std::complex<double> inv_ujj = fast_crecip(work_[j]);
+    u_diag_[j] = inv_ujj;
     u_data_[u_indptr_[j + 1] - 1] = work_[j];
-
-    std::complex<double> inv_ujj = 1.0 / work_[j];
     for (int lp = l_indptr_[j]; lp < l_indptr_[j + 1]; ++lp) {
-      l_data_[lp] = work_[l_rowidx_[lp]] * inv_ujj;
+      l_data_[lp] = fast_cmul(work_[l_rowidx_[lp]], inv_ujj);
     }
 
     // --- Step 4: Clear workspace ---
@@ -370,16 +395,17 @@ void IPFCramSolver::triangular_solve(
   // Forward substitution: Lz = b (L is unit lower triangular)
   for (int j = 0; j < n; ++j) {
     for (int lp = l_indptr_[j]; lp < l_indptr_[j + 1]; ++lp) {
-      x[l_rowidx_[lp]] -= l_data_[lp] * x[j];
+      x[l_rowidx_[lp]] -= fast_cmul(l_data_[lp], x[j]);
     }
   }
 
   // Back substitution: Ux = z
+  // u_diag_ stores reciprocals (1/U[j,j]) to avoid complex division
   for (int j = n - 1; j >= 0; --j) {
-    x[j] /= u_diag_[j];
+    x[j] = fast_cmul(x[j], u_diag_[j]);
 
     for (int up = u_indptr_[j]; up < u_indptr_[j + 1] - 1; ++up) {
-      x[u_rowidx_[up]] -= u_data_[up] * x[j];
+      x[u_rowidx_[up]] -= fast_cmul(u_data_[up], x[j]);
     }
   }
 }
