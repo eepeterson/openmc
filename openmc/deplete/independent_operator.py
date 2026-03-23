@@ -457,6 +457,7 @@ class IndependentOperator(OpenMCOperator):
 
         """
         from openmc.lib.deplete import cram_solve_batch
+        from scipy.sparse import csc_array
 
         # Determine source rates from power/power_density/source_rates
         if power is not None:
@@ -498,26 +499,50 @@ class IndependentOperator(OpenMCOperator):
         n = self.initial_condition()
         t = 0.0
 
+        # Precompute matrices once. For source-rate normalization, the
+        # depletion matrix A(sr) = A_decay + sr * A_rxn where A_decay and
+        # A_rxn are independent of both composition and source rate.
+        # This avoids calling operator.__call__ and form_matrix every step.
+
+        # Get base reaction rates at unit source rate
+        base_res = self(n, 1.0)
+
+        # Build reaction matrices (decay + reaction at sr=1) per material
+        fission_yields = self.chain.fission_yields
+        if len(fission_yields) == 1:
+            fy_list = [fission_yields[0]] * len(self.burnable_mats)
+        else:
+            fy_list = list(fission_yields)
+
+        matrices_unit = [self.chain.form_matrix(rates, fy)
+                         for rates, fy in zip(base_res.rates, fy_list)]
+
+        # Build pure decay matrix (same for all materials) by passing
+        # zero reaction rates for a single material slice
+        zero_rates = base_res.rates[0].copy()
+        zero_rates.fill(0.0)
+        decay_matrix = self.chain.form_matrix(zero_rates, fy_list[0])
+
+        # Reaction-only matrices: A_rxn = A_unit - A_decay
+        rxn_matrices = [m - decay_matrix for m in matrices_unit]
+
         for i, (dt, source_rate) in enumerate(zip(seconds, source_rates)):
             if output:
                 print(f"[openmc.deplete] t={t} s, dt={dt} s, "
                       f"source={source_rate}")
 
-            # Get reaction rates from operator
-            res = self(n, source_rate)
-
-            # Form depletion matrices for each material
-            fission_yields = self.chain.fission_yields
-            if len(fission_yields) == 1:
-                fy_iter = repeat(fission_yields[0])
+            # Scale precomputed matrices by source rate
+            if source_rate == 0.0:
+                matrices = [decay_matrix] * len(rxn_matrices)
+                decay_only = True
             else:
-                fy_iter = iter(fission_yields)
+                matrices = [decay_matrix + source_rate * rxn
+                            for rxn in rxn_matrices]
+                decay_only = False
 
-            matrices = [self.chain.form_matrix(rates, fy)
-                        for rates, fy in zip(res.rates, fy_iter)]
-
-            # Determine if this is a pure-decay step (zero source rate)
-            decay_only = (source_rate == 0.0)
+            # Build OperatorResult for saving (rates scaled by source_rate)
+            scaled_rates = base_res.rates * source_rate
+            res = OperatorResult(base_res.k, scaled_rates)
 
             # Solve all materials in parallel via C++
             start = time.time()
@@ -532,10 +557,11 @@ class IndependentOperator(OpenMCOperator):
             n = n_end
             t += dt
 
-        # Final operator evaluation
+        # Final save
         if output:
-            print(f"[openmc.deplete] t={t} (final operator evaluation)")
-        res_final = self(n, source_rate)
+            print(f"[openmc.deplete] t={t} (final)")
+        scaled_rates = base_res.rates * source_rate
+        res_final = OperatorResult(base_res.k, scaled_rates)
         StepResult.save(self, n, res_final, [t, t], source_rate,
                         len(seconds), proc_time, path=path)
 
