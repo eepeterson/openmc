@@ -425,6 +425,7 @@ list(APPEND libopenmc_SOURCES
   src/simulation.cpp
   src/source.cpp
   src/sparse_matrix.cpp
+  src/bateman_solvers.cpp
   src/state_point.cpp
   src/string_utils.cpp
   src/summary.cpp
