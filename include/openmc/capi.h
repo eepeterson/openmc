@@ -320,12 +320,9 @@ int openmc_properties_export(const char* filename);
 // \return Error code
 int openmc_properties_import(const char* filename);
 
-// Solve a single Bateman system using CRAM
+// Solve a Bateman system using CRAM. When perm is non-null, a triangular
+// forward-substitution solver optimized for pure-decay matrices is used.
 int openmc_cram_solve(int n, const int* indptr, const int* indices,
-  const double* data, const double* n0, double dt, int order, double* result);
-
-// Solve a pure-decay Bateman system using CRAM with triangular optimization
-int openmc_cram_solve_decay(int n, const int* indptr, const int* indices,
   const double* data, const double* n0, double dt, int order,
   const int* perm, double* result);
 

@@ -1,6 +1,6 @@
 """Ctypes bindings for C++ depletion solvers."""
 
-from ctypes import c_int, c_double
+from ctypes import c_int, c_double, c_void_p
 
 import numpy as np
 from numpy.ctypeslib import ndpointer
@@ -21,20 +21,7 @@ _dll.openmc_cram_solve.argtypes = [
     _array_1d_dbl,  # n0
     c_double,       # dt
     c_int,          # order
-    _array_1d_dbl,  # result
-]
-
-_dll.openmc_cram_solve_decay.restype = c_int
-_dll.openmc_cram_solve_decay.errcheck = _error_handler
-_dll.openmc_cram_solve_decay.argtypes = [
-    c_int,          # n
-    _array_1d_int,  # indptr
-    _array_1d_int,  # indices
-    _array_1d_dbl,  # data
-    _array_1d_dbl,  # n0
-    c_double,       # dt
-    c_int,          # order
-    _array_1d_int,  # perm
+    c_void_p,       # perm (nullable)
     _array_1d_dbl,  # result
 ]
 
@@ -82,10 +69,11 @@ def cram_solve(A, n0, dt, order=48, perm=None):
     result = np.empty(n, dtype=np.float64)
 
     if perm is not None:
-        perm_arr = np.asarray(perm, dtype=np.int32)
-        _dll.openmc_cram_solve_decay(
-            n, indptr, indices, data, n0_arr, dt, order, perm_arr, result)
+        perm_arr = np.ascontiguousarray(perm, dtype=np.int32)
+        perm_ptr = perm_arr.ctypes.data
     else:
-        _dll.openmc_cram_solve(
-            n, indptr, indices, data, n0_arr, dt, order, result)
+        perm_ptr = None
+
+    _dll.openmc_cram_solve(
+        n, indptr, indices, data, n0_arr, dt, order, perm_ptr, result)
     return result

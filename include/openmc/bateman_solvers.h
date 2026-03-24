@@ -60,8 +60,28 @@ public:
 
   explicit IPFCramSolver(Order order = Order::cram48);
 
+  //! Solve using full LU factorization (general transmutation matrix).
   vector<double> solve(
     const CSCMatrix& A, const vector<double>& n0, double dt) override;
+
+  //! Solve a pure-decay system using triangular forward substitution.
+  //!
+  //! Exploits the fact that radioactive decay chains have a DAG structure:
+  //! a topological permutation makes the decay matrix strictly
+  //! lower-triangular. After permutation, each CRAM pole requires only
+  //! O(nnz) forward substitution instead of a full LU factorization.
+  //! At solve-time, the matrix values are scattered into the permuted
+  //! lower-triangular structure, so changing decay constants between calls
+  //! is fully supported without reconstruction.
+  //!
+  //! \param A    Sparse decay matrix (n x n)
+  //! \param n0   Initial atom densities [n]
+  //! \param dt   Time interval [s]
+  //! \param perm Topological permutation: perm[new_idx] = old_idx.
+  //!             Must reorder the decay matrix into lower-triangular form.
+  //! \return     Final atom densities [n]
+  vector<double> solve(const CSCMatrix& A, const vector<double>& n0,
+    double dt, const vector<int>& perm);
 
 private:
   // --- CRAM coefficients ---
@@ -70,7 +90,7 @@ private:
   vector<std::complex<double>> theta_; //!< Poles [n_poles]
   double alpha0_;                      //!< Limit at infinity
 
-  // --- Symbolic factorization state (recomputed each solve call) ---
+  // --- General solver: symbolic factorization state ---
 
   //! L factor structure (CSC, unit lower triangular, diagonal not stored).
   //! Row indices within each column are sorted in ascending order.
@@ -84,16 +104,22 @@ private:
   vector<int> u_indptr_; //!< Column pointers [n+1]
   vector<int> u_rowidx_; //!< Row indices [u_nnz]
 
-  // --- Numeric factorization workspace (reused across poles) ---
+  // --- General solver: numeric factorization workspace ---
   vector<std::complex<double>> l_data_; //!< L factor values [l_nnz]
   vector<std::complex<double>> u_data_; //!< U factor values [u_nnz]
   vector<std::complex<double>> u_diag_; //!< U diagonal values [n]
+  vector<std::complex<double>> work_;   //!< Dense workspace [n]
 
-  // --- Solve workspace ---
-  vector<std::complex<double>> work_; //!< Dense workspace [n]
-  vector<std::complex<double>> x_;    //!< Complex solve result [n]
+  // --- Decay solver: permuted lower-triangular workspace ---
+  vector<int> lt_indptr_;    //!< Column pointers [n+1]
+  vector<int> lt_rowidx_;    //!< Row indices (below-diagonal only)
+  vector<double> lt_data_;   //!< Values (below-diagonal only)
+  vector<double> diag_;      //!< Diagonal values [n]
 
-  // --- Private methods ---
+  // --- Shared workspace ---
+  vector<std::complex<double>> x_; //!< Complex solve result [n]
+
+  // --- General solver private methods ---
 
   //! Compute L/U sparsity patterns for the given matrix structure.
   //! Uses a symbolic left-looking factorization with worklist-based fill
@@ -114,55 +140,6 @@ private:
   //! \param x  Solution vector (complex-valued)
   void triangular_solve(
     const vector<double>& b, vector<std::complex<double>>& x) const;
-};
-
-//==============================================================================
-//! IPF CRAM solver optimized for pure-decay (lower-triangular) matrices.
-//!
-//! Exploits the fact that radioactive decay chains have a DAG structure:
-//! a topological permutation makes the decay matrix strictly lower-triangular.
-//! After permutation, each CRAM pole requires only O(nnz) forward
-//! substitution instead of a full LU factorization.
-//!
-//! The topological permutation is provided at construction time (it depends
-//! on the chain topology, not the solver) and is reused for all solve calls.
-//! At solve-time, the matrix values are scattered into the permuted
-//! lower-triangular structure, so changing decay constants between calls
-//! is fully supported without reconstruction.
-//==============================================================================
-
-class IPFCramDecaySolver : public BatemanSolver {
-public:
-  using Order = IPFCramSolver::Order;
-
-  //! Construct a decay solver with a fixed topological permutation.
-  //! \param perm  Topological permutation: perm[new_idx] = old_idx.
-  //!              Must reorder the decay matrix into lower-triangular form.
-  //! \param order CRAM approximation order (16 or 48)
-  IPFCramDecaySolver(vector<int> perm, Order order = Order::cram48);
-
-  vector<double> solve(
-    const CSCMatrix& A, const vector<double>& n0, double dt) override;
-
-private:
-  // --- CRAM coefficients ---
-  int n_poles_;
-  vector<std::complex<double>> alpha_;
-  vector<std::complex<double>> theta_;
-  double alpha0_;
-
-  // --- Permutation (fixed at construction) ---
-  vector<int> perm_;     //!< perm_[new_idx] = old_idx
-  vector<int> inv_perm_; //!< inv_perm_[old_idx] = new_idx
-
-  // --- Solve workspace (reused across calls) ---
-  vector<std::complex<double>> x_; //!< Complex solve result [n]
-
-  // --- Permuted lower-triangular structure (rebuilt each solve) ---
-  vector<int> lt_indptr_;    //!< Column pointers [n+1]
-  vector<int> lt_rowidx_;    //!< Row indices (below-diagonal only)
-  vector<double> lt_data_;   //!< Values (below-diagonal only)
-  vector<double> diag_;      //!< Diagonal values [n]
 };
 
 } // namespace openmc

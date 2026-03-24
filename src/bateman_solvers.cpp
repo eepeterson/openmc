@@ -412,50 +412,28 @@ void IPFCramSolver::triangular_solve(
 }
 
 //==============================================================================
-// IPFCramDecaySolver implementation
+// IPFCramSolver::solve (decay variant)
 //
 // Optimized CRAM solver for pure-decay (lower-triangular) matrices.
-// The topological permutation is provided at construction. At solve-time,
-// the matrix values are scattered into a permuted lower-triangular
-// structure, and each CRAM pole is solved by forward substitution only.
+// The topological permutation is provided by the caller. The matrix values
+// are scattered into a permuted lower-triangular structure, and each CRAM
+// pole is solved by forward substitution only.
 //==============================================================================
 
-IPFCramDecaySolver::IPFCramDecaySolver(vector<int> perm, Order order)
-  : perm_(std::move(perm))
-{
-  int n = perm_.size();
-
-  // Build inverse permutation
-  inv_perm_.resize(n);
-  for (int i = 0; i < n; ++i) {
-    inv_perm_[perm_[i]] = i;
-  }
-
-  // Set CRAM coefficients
-  if (order == Order::cram16) {
-    n_poles_ = 8;
-    alpha_.assign(cram16_alpha, cram16_alpha + n_poles_);
-    theta_.assign(cram16_theta, cram16_theta + n_poles_);
-    alpha0_ = cram16_alpha0;
-  } else {
-    n_poles_ = 24;
-    alpha_.assign(cram48_alpha, cram48_alpha + n_poles_);
-    theta_.assign(cram48_theta, cram48_theta + n_poles_);
-    alpha0_ = cram48_alpha0;
-  }
-
-  // Preallocate workspace
-  x_.resize(n);
-  diag_.resize(n);
-}
-
-vector<double> IPFCramDecaySolver::solve(
-  const CSCMatrix& A, const vector<double>& n0, double dt)
+vector<double> IPFCramSolver::solve(
+  const CSCMatrix& A, const vector<double>& n0,
+  double dt, const vector<int>& perm)
 {
   int n = A.n();
   const auto& indptr = A.indptr();
   const auto& indices = A.indices();
   const auto& data = A.data();
+
+  // Build inverse permutation
+  vector<int> inv_perm(n);
+  for (int i = 0; i < n; ++i) {
+    inv_perm[perm[i]] = i;
+  }
 
   // Scatter A into permuted lower-triangular structure.
   // After permutation, off-diagonal entries satisfy new_row > new_col.
@@ -464,9 +442,9 @@ vector<double> IPFCramDecaySolver::solve(
   // First pass: count off-diagonal entries per permuted column
   vector<int> col_counts(n, 0);
   for (int old_col = 0; old_col < n; ++old_col) {
-    int new_col = inv_perm_[old_col];
+    int new_col = inv_perm[old_col];
     for (int p = indptr[old_col]; p < indptr[old_col + 1]; ++p) {
-      int new_row = inv_perm_[indices[p]];
+      int new_row = inv_perm[indices[p]];
       if (new_row == new_col) {
         diag_[new_col] = data[p];
       } else {
@@ -489,9 +467,9 @@ vector<double> IPFCramDecaySolver::solve(
   vector<int> col_pos(n, 0);
 
   for (int old_col = 0; old_col < n; ++old_col) {
-    int new_col = inv_perm_[old_col];
+    int new_col = inv_perm[old_col];
     for (int p = indptr[old_col]; p < indptr[old_col + 1]; ++p) {
-      int new_row = inv_perm_[indices[p]];
+      int new_row = inv_perm[indices[p]];
       if (new_row != new_col) {
         int pos = lt_indptr_[new_col] + col_pos[new_col]++;
         lt_rowidx_[pos] = new_row;
@@ -530,10 +508,11 @@ vector<double> IPFCramDecaySolver::solve(
   // Permute n0 into topological order
   vector<double> y(n);
   for (int i = 0; i < n; ++i) {
-    y[i] = n0[perm_[i]];
+    y[i] = n0[perm[i]];
   }
 
   // IPF CRAM iteration in permuted space
+  x_.resize(n);
   for (int p = 0; p < n_poles_; ++p) {
     auto theta_p = theta_[p];
 
@@ -565,7 +544,7 @@ vector<double> IPFCramDecaySolver::solve(
   // Scale by alpha0 and permute back to original order
   vector<double> result(n);
   for (int i = 0; i < n; ++i) {
-    result[perm_[i]] = y[i] * alpha0_;
+    result[perm[i]] = y[i] * alpha0_;
   }
 
   return result;
@@ -581,7 +560,7 @@ using namespace openmc;
 
 extern "C" int openmc_cram_solve(int n, const int* indptr,
   const int* indices, const double* data, const double* n0, double dt,
-  int order, double* result)
+  int order, const int* perm, double* result)
 {
   try {
     if (order != 16 && order != 48) {
@@ -602,40 +581,15 @@ extern "C" int openmc_cram_solve(int n, const int* indptr,
     CSCMatrix A(std::move(pattern), std::move(d));
 
     vector<double> n0_vec(n0, n0 + n);
-    vector<double> y = solver.solve(A, n0_vec, dt);
-    std::copy(y.begin(), y.end(), result);
-  } catch (const std::exception& e) {
-    set_errmsg(e.what());
-    return OPENMC_E_UNASSIGNED;
-  }
-  return 0;
-}
+    vector<double> y;
 
-extern "C" int openmc_cram_solve_decay(int n, const int* indptr,
-  const int* indices, const double* data, const double* n0, double dt,
-  int order, const int* perm, double* result)
-{
-  try {
-    if (order != 16 && order != 48) {
-      set_errmsg(fmt::format(
-        "CRAM order must be 16 or 48, got {}", order));
-      return OPENMC_E_INVALID_ARGUMENT;
+    if (perm != nullptr) {
+      vector<int> perm_vec(perm, perm + n);
+      y = solver.solve(A, n0_vec, dt, perm_vec);
+    } else {
+      y = solver.solve(A, n0_vec, dt);
     }
 
-    auto cram_order = (order == 16) ? IPFCramSolver::Order::cram16
-                                    : IPFCramSolver::Order::cram48;
-
-    vector<int> perm_vec(perm, perm + n);
-    IPFCramDecaySolver solver(std::move(perm_vec), cram_order);
-
-    vector<int> ip(indptr, indptr + n + 1);
-    vector<int> ix(indices, indices + indptr[n]);
-    vector<double> d(data, data + indptr[n]);
-    CSCPattern pattern(n, std::move(ip), std::move(ix));
-    CSCMatrix A(std::move(pattern), std::move(d));
-
-    vector<double> n0_vec(n0, n0 + n);
-    vector<double> y = solver.solve(A, n0_vec, dt);
     std::copy(y.begin(), y.end(), result);
   } catch (const std::exception& e) {
     set_errmsg(e.what());
