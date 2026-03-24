@@ -39,8 +39,14 @@ _dll.openmc_cram_solve_decay.argtypes = [
 ]
 
 
-def cram_solve(A, n0, dt, order=48):
-    """Solve a single Bateman depletion system using C++ CRAM.
+def cram_solve(A, n0, dt, order=48, perm=None):
+    """Solve a Bateman depletion system using C++ CRAM.
+
+    When *perm* is ``None``, the general IPF CRAM solver is used (full LU
+    factorization per pole). When *perm* is provided, the matrix is assumed
+    to be a pure-decay matrix that becomes lower-triangular under the given
+    topological permutation, and an optimized forward-substitution solver
+    is used instead.
 
     Parameters
     ----------
@@ -53,47 +59,11 @@ def cram_solve(A, n0, dt, order=48):
         Time step in seconds.
     order : int
         CRAM approximation order (16 or 48).
-
-    Returns
-    -------
-    numpy.ndarray
-        Final atom numbers after time *dt*.
-
-    """
-    n = A.shape[0]
-    indptr = np.asarray(A.indptr, dtype=np.int32)
-    indices = np.asarray(A.indices, dtype=np.int32)
-    data = np.asarray(A.data, dtype=np.float64)
-    n0_arr = np.asarray(n0, dtype=np.float64)
-    result = np.empty(n, dtype=np.float64)
-
-    _dll.openmc_cram_solve(n, indptr, indices, data, n0_arr, dt, order, result)
-    return result
-
-
-def cram_solve_decay(A, n0, dt, perm, order=48):
-    """Solve a pure-decay Bateman system using C++ CRAM with triangular
-    optimization.
-
-    This solver exploits the lower-triangular structure of decay matrices
-    (after topological permutation) to avoid full LU factorization. Each
-    CRAM pole requires only O(nnz) forward substitution, giving significant
-    speedup over the general solver for decay-only steps.
-
-    Parameters
-    ----------
-    A : scipy.sparse.csc_array
-        Sparse decay matrix (n x n).
-    n0 : numpy.ndarray
-        Initial atom number vector of length *n*.
-    dt : float
-        Time step in seconds.
-    perm : numpy.ndarray
+    perm : numpy.ndarray, optional
         Topological permutation vector of length *n*.
-        ``perm[new_idx] = old_idx`` reorders the matrix into
-        lower-triangular form.
-    order : int
-        CRAM approximation order (16 or 48).
+        ``perm[new_idx] = old_idx`` reorders a decay matrix into
+        lower-triangular form. When provided, the fast triangular
+        decay solver is used.
 
     Returns
     -------
@@ -106,9 +76,13 @@ def cram_solve_decay(A, n0, dt, perm, order=48):
     indices = np.asarray(A.indices, dtype=np.int32)
     data = np.asarray(A.data, dtype=np.float64)
     n0_arr = np.asarray(n0, dtype=np.float64)
-    perm_arr = np.asarray(perm, dtype=np.int32)
     result = np.empty(n, dtype=np.float64)
 
-    _dll.openmc_cram_solve_decay(
-        n, indptr, indices, data, n0_arr, dt, order, perm_arr, result)
+    if perm is not None:
+        perm_arr = np.asarray(perm, dtype=np.int32)
+        _dll.openmc_cram_solve_decay(
+            n, indptr, indices, data, n0_arr, dt, order, perm_arr, result)
+    else:
+        _dll.openmc_cram_solve(
+            n, indptr, indices, data, n0_arr, dt, order, result)
     return result

@@ -472,7 +472,7 @@ class IndependentOperator(OpenMCOperator):
             If a timestep value is not a real number.
 
         """
-        from openmc.lib.deplete import cram_solve, cram_solve_decay
+        from openmc.lib.deplete import cram_solve
         from scipy.sparse import csc_array
 
         # Determine source rates from power/power_density/source_rates
@@ -553,8 +553,8 @@ class IndependentOperator(OpenMCOperator):
             start = time.time()
             if source_rate == 0.0:
                 # Pure decay: use fast triangular solver
-                n_end = [cram_solve_decay(decay_matrix, n0_i, dt,
-                                          topo_perm, order=order)
+                n_end = [cram_solve(decay_matrix, n0_i, dt,
+                                    perm=topo_perm, order=order)
                          for n0_i in n]
             else:
                 matrices = [decay_matrix + source_rate * rxn
