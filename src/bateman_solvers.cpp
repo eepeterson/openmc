@@ -160,12 +160,10 @@ vector<double> IPFCramSolver::solve(
 {
   int n = A.n();
 
-  // Check if we need to redo symbolic factorization
-  CSCPattern candidate = A.pattern().with_diagonal();
-  if (!(candidate == solve_pattern_)) {
-    solve_pattern_ = std::move(candidate);
-    symbolic_factorize(solve_pattern_);
-  }
+  // Symbolic factorization: compute L/U sparsity patterns for this matrix.
+  // Reused across all pole solves below.
+  CSCPattern pattern = A.pattern().with_diagonal();
+  symbolic_factorize(pattern);
 
   // IPF CRAM iteration:
   //   y_0 = n0
@@ -174,7 +172,7 @@ vector<double> IPFCramSolver::solve(
   vector<double> y(n0.begin(), n0.end());
 
   for (int p = 0; p < n_poles_; ++p) {
-    numeric_factorize(A, dt, theta_[p]);
+    numeric_factorize(A, pattern, dt, theta_[p]);
     triangular_solve(y, x_);
 
     // y += 2 * Re(alpha_p * x_p)
@@ -196,11 +194,13 @@ vector<double> IPFCramSolver::solve(
 // Symbolic factorization
 //
 // Computes the exact L/U sparsity patterns for left-looking column LU
-// factorization without pivoting. The CRAM complex diagonal shift
-// guarantees |Im(theta)| >= 1.194 for all poles, making the diagonal
-// entry always the largest in magnitude in its column and eliminating the
-// need for pivoting. This means the L/U patterns are deterministic and
-// identical across all poles.
+// factorization without pivoting. Pivoting is unnecessary because the
+// transmutation matrix A is Metzler (non-negative off-diagonal entries)
+// and each CRAM pole theta has nonzero imaginary part. For M = A*dt - theta*I
+// with A Metzler, unpivoted Gaussian elimination produces pivots u_jj
+// satisfying |u_jj| >= |Im(theta)| >= 1.194. This guarantees non-singular
+// factorization, and since no row swaps occur the L/U patterns are
+// deterministic and identical across all poles.
 //
 // Algorithm: symbolic left-looking factorization with worklist-based fill
 // propagation. For each column j, start with the structural nonzeros of
@@ -313,16 +313,16 @@ void IPFCramSolver::symbolic_factorize(const CSCPattern& pattern)
 // resolves fill-in dependencies between earlier columns.
 //==============================================================================
 
-void IPFCramSolver::numeric_factorize(
-  const CSCMatrix& A, double dt, std::complex<double> theta)
+void IPFCramSolver::numeric_factorize(const CSCMatrix& A,
+  const CSCPattern& pattern, double dt, std::complex<double> theta)
 {
   int n = A.n();
   const auto& a_indptr = A.indptr();
   const auto& a_indices = A.indices();
   const auto& a_data = A.data();
 
-  const auto& sp_indptr = solve_pattern_.indptr();
-  const auto& sp_indices = solve_pattern_.indices();
+  const auto& sp_indptr = pattern.indptr();
+  const auto& sp_indices = pattern.indices();
 
   for (int j = 0; j < n; ++j) {
 

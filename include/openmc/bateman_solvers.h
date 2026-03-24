@@ -56,13 +56,18 @@ public:
 //!   M. Pusa, "Higher-Order Chebyshev Rational Approximation Method and
 //!   Application to Burnup Equations," Nucl. Sci. Eng., 182:3, 297-318 (2016).
 //!
-//! The solver caches L/U sparsity patterns so that repeated calls with the
-//! same matrix pattern skip symbolic analysis. The numeric factorization
-//! uses left-looking column LU without pivoting: the complex diagonal shift
-//! from each CRAM pole guarantees |Im(theta)| >= 1.194, ensuring the
-//! diagonal dominance needed for stable unpivoted factorization. This
-//! makes the L/U patterns identical across all poles, allowing a single
-//! symbolic phase to serve all 24 (CRAM48) or 8 (CRAM16) linear solves.
+//! The numeric factorization uses left-looking column LU without
+//! pivoting. Each call to solve() performs a symbolic factorization
+//! to compute L/U sparsity patterns, then reuses those patterns for
+//! all pole solves within that call. Pivoting is unnecessary
+//! because the transmutation matrix is Metzler (non-negative off-diagonal)
+//! and the CRAM poles have nonzero imaginary parts (|Im(theta)| >= 1.194).
+//! For any real Metzler matrix R and complex shift theta with Im(theta) != 0,
+//! unpivoted Gaussian elimination on (R - theta*I) produces pivots u_jj
+//! satisfying |u_jj| >= |Im(theta)|, guaranteeing non-singular factorization.
+//! Since pivoting is not needed, the L/U sparsity patterns are deterministic
+//! and identical across all poles, allowing a single symbolic phase to serve
+//! all 24 (CRAM48) or 8 (CRAM16) linear solves.
 //==============================================================================
 
 class IPFCramSolver : public BatemanSolver {
@@ -92,12 +97,7 @@ private:
   vector<std::complex<double>> theta_; //!< Poles [n_poles]
   double alpha0_;                      //!< Limit at infinity
 
-  // --- Cached symbolic factorization state ---
-
-  //! Sparsity pattern used for the current factorization (A's pattern with
-  //! forced diagonal entries). Compared against incoming matrices to detect
-  //! when re-analysis is needed.
-  CSCPattern solve_pattern_;
+  // --- Symbolic factorization state (recomputed each solve call) ---
 
   //! L factor structure (CSC, unit lower triangular, diagonal not stored).
   //! Row indices within each column are sorted in ascending order.
@@ -154,11 +154,12 @@ private:
 
   //! Numerically factorize the shifted complex matrix (A*dt - theta*I).
   //! Uses left-looking column LU without pivoting.
-  //! \param A     Real transmutation matrix
-  //! \param dt    Time step
-  //! \param theta Complex pole (shift)
-  void numeric_factorize(
-    const CSCMatrix& A, double dt, std::complex<double> theta);
+  //! \param A       Real transmutation matrix
+  //! \param pattern Input sparsity pattern (A with forced diagonal)
+  //! \param dt      Time step
+  //! \param theta   Complex pole (shift)
+  void numeric_factorize(const CSCMatrix& A, const CSCPattern& pattern,
+    double dt, std::complex<double> theta);
 
   //! Solve the triangular system LUx = b using the current factorization.
   //! \param b  Right-hand side (real-valued initial composition)
