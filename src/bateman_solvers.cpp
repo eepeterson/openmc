@@ -6,6 +6,7 @@
 #include <algorithm> // for sort
 #include <complex>
 
+#include "openmc/capi.h"
 #include "openmc/error.h"
 
 namespace openmc {
@@ -583,6 +584,12 @@ extern "C" int openmc_cram_solve(int n, const int* indptr,
   int order, double* result)
 {
   try {
+    if (order != 16 && order != 48) {
+      set_errmsg(fmt::format(
+        "CRAM order must be 16 or 48, got {}", order));
+      return OPENMC_E_INVALID_ARGUMENT;
+    }
+
     auto cram_order = (order == 16) ? IPFCramSolver::Order::cram16
                                     : IPFCramSolver::Order::cram48;
     IPFCramSolver solver(cram_order);
@@ -609,6 +616,12 @@ extern "C" int openmc_cram_solve_decay(int n, const int* indptr,
   int order, const int* perm, double* result)
 {
   try {
+    if (order != 16 && order != 48) {
+      set_errmsg(fmt::format(
+        "CRAM order must be 16 or 48, got {}", order));
+      return OPENMC_E_INVALID_ARGUMENT;
+    }
+
     auto cram_order = (order == 16) ? IPFCramSolver::Order::cram16
                                     : IPFCramSolver::Order::cram48;
 

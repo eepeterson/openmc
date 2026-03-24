@@ -71,6 +71,9 @@ def cram_solve(A, n0, dt, order=48, perm=None):
         Final atom numbers after time *dt*.
 
     """
+    if order not in (16, 48):
+        raise ValueError(f"CRAM order must be 16 or 48, got {order}")
+
     n = A.shape[0]
     indptr = np.asarray(A.indptr, dtype=np.int32)
     indices = np.asarray(A.indices, dtype=np.int32)

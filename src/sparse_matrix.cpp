@@ -1,10 +1,9 @@
 //! \file sparse_matrix.cpp
-//! \brief Implementation of CSCPattern, CSCMatrix, and ComplexCSCMatrix
+//! \brief Implementation of CSCPattern and CSCMatrix
 
 #include "openmc/sparse_matrix.h"
 
 #include <algorithm>  // for sort, fill
-#include <complex>    // for complex
 #include <functional> // for plus
 #include <numeric>    // for iota
 #include <utility>    // for pair
@@ -88,7 +87,8 @@ CSCPattern CSCPattern::permute(const vector<int>& perm) const
 
 bool CSCPattern::operator==(const CSCPattern& other) const
 {
-  return n_ == other.n_ && indptr_ == other.indptr_;
+  return n_ == other.n_ && indptr_ == other.indptr_ &&
+         indices_ == other.indices_;
 }
 
 CSCPattern CSCPattern::with_diagonal() const
@@ -222,51 +222,6 @@ CSCMatrix CSCMatrix::permute(const vector<int>& perm) const
   }
 
   return CSCMatrix::from_triplets(n, new_rows, new_cols, new_vals);
-}
-
-//==============================================================================
-// ComplexCSCMatrix implementation
-//==============================================================================
-
-ComplexCSCMatrix ComplexCSCMatrix::from_real(
-  const CSCPattern& target_pattern, const CSCMatrix& A, double scale)
-{
-  int n = target_pattern.n();
-  const auto& t_indptr = target_pattern.indptr();
-  const auto& t_indices = target_pattern.indices();
-  const auto& a_indptr = A.indptr();
-  const auto& a_indices = A.indices();
-  const auto& a_data = A.data();
-
-  // Allocate zero-initialized complex data
-  vector<std::complex<double>> data(target_pattern.nnz(), {0.0, 0.0});
-
-  // Copy scaled real values into matching positions
-  for (int col = 0; col < n; ++col) {
-    int t_pos = t_indptr[col];
-    int t_end = t_indptr[col + 1];
-    int a_pos = a_indptr[col];
-    int a_end = a_indptr[col + 1];
-
-    // Merge: target rows are sorted, A rows are sorted
-    while (t_pos < t_end && a_pos < a_end) {
-      if (t_indices[t_pos] == a_indices[a_pos]) {
-        data[t_pos] = scale * a_data[a_pos];
-        ++t_pos;
-        ++a_pos;
-      } else if (t_indices[t_pos] < a_indices[a_pos]) {
-        ++t_pos;
-      } else {
-        ++a_pos;
-      }
-    }
-  }
-
-  // Copy the pattern (target_pattern is a superset of A's pattern)
-  CSCPattern pattern_copy(n, vector<int>(t_indptr.begin(), t_indptr.end()),
-    vector<int>(t_indices.begin(), t_indices.end()));
-
-  return ComplexCSCMatrix(std::move(pattern_copy), std::move(data));
 }
 
 } // namespace openmc

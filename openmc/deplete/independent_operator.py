@@ -6,33 +6,20 @@ transport solver by using user-provided multigroup fluxes and cross sections.
 """
 
 from __future__ import annotations
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 import copy
-import math
-import time
-from itertools import repeat
-from numbers import Real
 
 import numpy as np
 from uncertainties import ufloat
 
 import openmc
-from openmc.checkvalue import check_type, check_greater_than
+from openmc.checkvalue import check_type
 from openmc.mpi import comm
 from .abc import ReactionRateHelper, OperatorResult
-
-# Time unit conversion factors to seconds
-_SECONDS_PER_UNIT = {
-    's': 1, 'sec': 1, 'min': 60, 'minute': 60,
-    'h': 3600, 'hr': 3600, 'hour': 3600,
-    'd': 86400, 'day': 86400,
-    'a': 31557600, 'year': 31557600
-}
 from .openmc_operator import OpenMCOperator
 from .pool import _distribute
 from .microxs import MicroXS
 from .results import Results
-from .stepresult import StepResult
 from .helpers import ChainFissionHelper, ConstantFissionYieldHelper, SourceRateHelper
 
 
@@ -427,157 +414,6 @@ class IndependentOperator(OpenMCOperator):
 
         op_result = OperatorResult(keff, rates)
         return copy.deepcopy(op_result)
-
-    def deplete(self, timesteps, source_rates=None, power=None,
-                power_density=None, timestep_units='s', order=48,
-                output=True, path='depletion_results.h5'):
-        """Run a full predictor depletion calculation using C++ CRAM solver.
-
-        This method performs a first-order predictor integration over the
-        given timesteps, using the C++ IPF CRAM solver with OpenMP
-        parallelism across materials. It replaces the need to create a
-        separate :class:`~openmc.deplete.PredictorIntegrator` and call
-        its :meth:`integrate` method.
-
-        Parameters
-        ----------
-        timesteps : iterable of float or iterable of tuple
-            Array of timesteps. Note that values are not cumulative. The
-            units are specified by the `timestep_units` argument when
-            `timesteps` is an iterable of float. Alternatively, units can
-            be specified for each step by passing an iterable of
-            (value, unit) tuples.
-        source_rates : float or iterable of float, optional
-            Source rate in [neutron/sec] or [W] for each interval.
-        power : float or iterable of float, optional
-            Power of the reactor in [W].
-        power_density : float or iterable of float, optional
-            Power density in [W/gHM].
-        timestep_units : str, optional
-            Units for timestep values. Default is 's'.
-        order : int, optional
-            CRAM approximation order (16 or 48). Default is 48.
-        output : bool, optional
-            Whether to display progress information. Default is True.
-        path : PathLike, optional
-            Path to file to write depletion results. Default is
-            'depletion_results.h5'.
-
-        Raises
-        ------
-        ValueError
-            If none of source_rates, power, or power_density is provided,
-            or if an invalid timestep unit is given.
-        TypeError
-            If a timestep value is not a real number.
-
-        """
-        from openmc.lib.deplete import cram_solve
-        from scipy.sparse import csc_array
-
-        # Determine source rates from power/power_density/source_rates
-        if power is not None:
-            source_rates = power
-        elif power_density is not None:
-            if not isinstance(power_density, Iterable):
-                source_rates = power_density * self.heavy_metal
-            else:
-                source_rates = [p * self.heavy_metal for p in power_density]
-        elif source_rates is None:
-            raise ValueError(
-                "One of source_rates, power, or power_density must be set")
-
-        # Normalize timesteps to seconds and source_rates to array
-        if not isinstance(source_rates, Sequence):
-            source_rates = [source_rates] * len(timesteps)
-
-        if isinstance(timesteps[0], Sequence):
-            times, units = zip(*timesteps)
-        else:
-            times = timesteps
-            units = [timestep_units] * len(timesteps)
-
-        seconds = []
-        for ts, unit in zip(times, units):
-            check_type('timestep', ts, Real)
-            check_greater_than('timestep', ts, 0.0, False)
-            factor = _SECONDS_PER_UNIT.get(unit)
-            if factor is None:
-                raise ValueError(f"Invalid timestep unit '{unit}'")
-            seconds.append(ts * factor)
-
-        # Initialize compositions
-        n = self.initial_condition()
-        t = 0.0
-
-        # Precompute matrices once. For source-rate normalization, the
-        # depletion matrix A(sr) = A_decay + sr * A_rxn where A_decay and
-        # A_rxn are independent of both composition and source rate.
-        # This avoids calling operator.__call__ and form_matrix every step.
-
-        # Get base reaction rates at unit source rate
-        base_res = self(n, 1.0)
-
-        # Build reaction matrices (decay + reaction at sr=1) per material
-        fission_yields = self.chain.fission_yields
-        if len(fission_yields) == 1:
-            fy_list = [fission_yields[0]] * len(self.burnable_mats)
-        else:
-            fy_list = list(fission_yields)
-
-        matrices_unit = [self.chain.form_matrix(rates, fy)
-                         for rates, fy in zip(base_res.rates, fy_list)]
-
-        # Build pure decay matrix (same for all materials) by passing
-        # zero reaction rates for a single material slice
-        zero_rates = base_res.rates[0].copy()
-        zero_rates.fill(0.0)
-        decay_matrix = self.chain.form_matrix(zero_rates, fy_list[0])
-
-        # Topological permutation for fast decay solves
-        topo_perm = self.chain.topological_permutation()
-
-        # Reaction-only matrices: A_rxn = A_unit - A_decay
-        rxn_matrices = [m - decay_matrix for m in matrices_unit]
-
-        for i, (dt, source_rate) in enumerate(zip(seconds, source_rates)):
-            if output:
-                print(f"[openmc.deplete] t={t} s, dt={dt} s, "
-                      f"source={source_rate}")
-
-            # Build OperatorResult for saving (rates scaled by source_rate)
-            scaled_rates = base_res.rates * source_rate
-            res = OperatorResult(base_res.k, scaled_rates)
-
-            # Solve all materials in parallel via C++
-            start = time.time()
-            if source_rate == 0.0:
-                # Pure decay: use fast triangular solver
-                n_end = [cram_solve(decay_matrix, n0_i, dt,
-                                    perm=topo_perm, order=order)
-                         for n0_i in n]
-            else:
-                matrices = [decay_matrix + source_rate * rxn
-                            for rxn in rxn_matrices]
-                n_end = [cram_solve(A_i, n0_i, dt, order=order)
-                         for A_i, n0_i in zip(matrices, n)]
-            proc_time = time.time() - start
-
-            # Save results
-            StepResult.save(self, n, res, [t, t + dt], source_rate, i,
-                            proc_time, path=path)
-
-            n = n_end
-            t += dt
-
-        # Final save
-        if seconds:
-            if output:
-                print(f"[openmc.deplete] t={t} (final)")
-            scaled_rates = base_res.rates * source_rate
-            res_final = OperatorResult(base_res.k, scaled_rates)
-            StepResult.save(self, n, res_final, [t, t], source_rate,
-                            len(seconds), proc_time, path=path)
 
     def _update_materials(self):
         """Updates material compositions in OpenMC on all processes."""

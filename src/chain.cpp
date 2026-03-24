@@ -241,7 +241,6 @@ void DepletionChain::compute_decay_matrix()
   }
 
   decay_matrix_ = CSCMatrix::from_triplets(n, rows, cols, vals);
-  perm_decay_matrix_ = decay_matrix_.permute(topo_perm_);
 }
 
 void DepletionChain::compute_bateman_pattern()
@@ -279,7 +278,6 @@ void DepletionChain::compute_bateman_pattern()
   }
 
   bateman_pattern_ = CSCPattern::from_triplets(n, rows, cols);
-  perm_bateman_pattern_ = bateman_pattern_.permute(topo_perm_);
 }
 
 //==============================================================================

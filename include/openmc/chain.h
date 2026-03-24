@@ -150,17 +150,8 @@ public:
   //! Decay matrix in the original (unpermuted) ordering
   const CSCMatrix& decay_matrix() const { return decay_matrix_; }
 
-  //! Decay matrix in topologically permuted ordering
-  const CSCMatrix& perm_decay_matrix() const { return perm_decay_matrix_; }
-
   //! Sparsity pattern of the Bateman matrix (union of all reaction channels)
   const CSCPattern& bateman_pattern() const { return bateman_pattern_; }
-
-  //! Permuted Bateman pattern
-  const CSCPattern& perm_bateman_pattern() const
-  {
-    return perm_bateman_pattern_;
-  }
 
 private:
   // --- Computation helpers (called at end of load_xml) ---
@@ -174,9 +165,7 @@ private:
 
   vector<int> topo_perm_;
   CSCMatrix decay_matrix_;
-  CSCMatrix perm_decay_matrix_;
   CSCPattern bateman_pattern_;
-  CSCPattern perm_bateman_pattern_;
 };
 
 //==============================================================================

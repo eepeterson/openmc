@@ -4,6 +4,7 @@ This module contains information about a depletion chain.  A depletion chain is
 loaded from an .xml file and all the nuclides are linked together.
 """
 
+from graphlib import TopologicalSorter
 from io import StringIO
 from itertools import chain
 import math
@@ -269,6 +270,7 @@ class Chain:
         self.reactions = []
         self.nuclide_dict = {}
         self._fission_yields = None
+        self._decay_topo_permutation = None
 
     def __contains__(self, nuclide):
         return nuclide in self.nuclide_dict
@@ -604,58 +606,52 @@ class Chain:
             out[nuc.name] = dict(yield_obj)
         return out
 
-    def topological_permutation(self):
-        """Compute a topological permutation of the decay chain.
+    @property
+    def decay_topo_permutation(self):
+        """Permutation that makes a decay-only depletion matrix lower-triangular.
 
-        Returns a permutation vector ``perm`` such that ``perm[new] = old``
-        reorders the decay matrix into lower-triangular form.  Uses Kahn's
-        algorithm with tie-breaking by name so the ordering is deterministic.
+        Returns a permutation vector ``perm`` of length ``len(self)`` where
+        ``perm[new_idx] = old_idx``.  Ties within each topological level
+        are broken by ``(-A, -Z, -m)``.
 
         Returns
         -------
-        numpy.ndarray of int32
+        numpy.ndarray of int
             Permutation vector of length ``len(self)``.
 
         """
-        from collections import deque
+        if self._decay_topo_permutation is None:
+            keys = [(-a, -z, -m) for z, a, m in
+                    (zam(nuc.name) for nuc in self.nuclides)]
 
-        n = len(self)
+            ts = TopologicalSorter()
+            he4_idx = self.nuclide_dict.get('He4')
+            h1_idx = self.nuclide_dict.get('H1')
+            for i, nuc in enumerate(self.nuclides):
+                ts.add(i)
+                if nuc.half_life is not None:
+                    for decay_type, target, _ in nuc.decay_modes:
+                        if target is not None and target in self.nuclide_dict:
+                            j = self.nuclide_dict[target]
+                            if j != i:
+                                ts.add(j, i)
+                        # Alpha and proton decay also feed He4 / H1
+                        if 'alpha' in decay_type and he4_idx is not None:
+                            if he4_idx != i:
+                                ts.add(he4_idx, i)
+                        elif 'p' in decay_type and h1_idx is not None:
+                            if h1_idx != i:
+                                ts.add(h1_idx, i)
 
-        # Build adjacency list: parent -> list of daughter indices
-        # In-degree counts how many parents feed into each nuclide
-        in_degree = np.zeros(n, dtype=int)
-        children = [[] for _ in range(n)]
+            ts.prepare()
+            order = []
+            while ts.is_active():
+                level = sorted(ts.get_ready(), key=lambda i: keys[i])
+                order.extend(level)
+                ts.done(*level)
 
-        for i, nuc in enumerate(self.nuclides):
-            if nuc.n_decay_modes == 0:
-                continue
-            for _, target, _ in nuc.decay_modes:
-                if target is not None and target in self.nuclide_dict:
-                    j = self.nuclide_dict[target]
-                    children[i].append(j)
-                    in_degree[j] += 1
-
-        # Initialize queue with zero in-degree nuclides, sorted by name
-        queue = sorted(
-            [i for i in range(n) if in_degree[i] == 0],
-            key=lambda i: self.nuclides[i].name
-        )
-        queue = deque(queue)
-
-        perm = []
-        while queue:
-            u = queue.popleft()
-            perm.append(u)
-            # Collect newly freed children, sort for determinism
-            freed = []
-            for v in children[u]:
-                in_degree[v] -= 1
-                if in_degree[v] == 0:
-                    freed.append(v)
-            freed.sort(key=lambda i: self.nuclides[i].name)
-            queue.extend(freed)
-
-        return np.array(perm, dtype=np.int32)
+            self._decay_topo_permutation = np.array(order, dtype=np.int32)
+        return self._decay_topo_permutation
 
     def form_matrix(self, rates, fission_yields=None):
         """Forms depletion matrix.
@@ -1416,6 +1412,7 @@ def _get_chain(
 
 def _invalidate_chain_cache(chain):
     """Invalidate the cache for a specific Chain (when it is modifed)."""
+    chain._decay_topo_permutation = None
     if hasattr(chain, '_xml_path'):
         # Remove all entries with the same path as self._xml_path
         for key in list(_CHAIN_CACHE.keys()):
