@@ -660,7 +660,7 @@ void cram_solve_batch(int n_systems, int order, const int* dimensions,
     solvers.emplace_back(cram_order);
   }
 
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic) if(n_systems > 1)
   for (int i = 0; i < n_systems; ++i) {
     int tid = 0;
 #ifdef _OPENMP
@@ -687,7 +687,7 @@ void cram_solve_batch(int n_systems, int order, const int* dimensions,
     vector<int> indices(all_indices + ix_start, all_indices + ix_start + nnz);
     vector<double> data(all_data + ix_start, all_data + ix_start + nnz);
 
-    CSCPattern pattern(n, std::move(indptr), vector<int>(indices));
+    CSCPattern pattern(n, std::move(indptr), std::move(indices));
     CSCMatrix A(std::move(pattern), std::move(data));
 
     // Get initial composition
@@ -714,6 +714,32 @@ void cram_solve_batch(int n_systems, int order, const int* dimensions,
 //==============================================================================
 
 using namespace openmc;
+
+extern "C" int openmc_cram_solve(int n, const int* indptr,
+  const int* indices, const double* data, const double* n0, double dt,
+  int order, double* result)
+{
+  try {
+    auto cram_order = (order == 16) ? IPFCramSolver::Order::cram16
+                                    : IPFCramSolver::Order::cram48;
+    IPFCramSolver solver(cram_order);
+
+    // Construct CSCMatrix from raw arrays (copies into solver-owned storage)
+    vector<int> ip(indptr, indptr + n + 1);
+    vector<int> ix(indices, indices + indptr[n]);
+    vector<double> d(data, data + indptr[n]);
+    CSCPattern pattern(n, std::move(ip), std::move(ix));
+    CSCMatrix A(std::move(pattern), std::move(d));
+
+    vector<double> n0_vec(n0, n0 + n);
+    vector<double> y = solver.solve(A, n0_vec, dt);
+    std::copy(y.begin(), y.end(), result);
+  } catch (const std::exception& e) {
+    set_errmsg(e.what());
+    return OPENMC_E_UNASSIGNED;
+  }
+  return 0;
+}
 
 extern "C" int openmc_cram_solve_batch(int n_systems, int order,
   const int* dimensions, const int* indptr_offsets, const int* all_indptr,

@@ -93,27 +93,51 @@ bool CSCPattern::operator==(const CSCPattern& other) const
 
 CSCPattern CSCPattern::with_diagonal() const
 {
-  // Collect all existing entries plus any missing diagonal entries
-  vector<int> new_rows;
-  vector<int> new_cols;
-  new_rows.reserve(nnz() + n_);
-  new_cols.reserve(nnz() + n_);
-
+  // First pass: count entries per column, noting missing diagonals
+  int extra = 0;
   for (int col = 0; col < n_; ++col) {
     bool has_diag = false;
     for (int idx = indptr_[col]; idx < indptr_[col + 1]; ++idx) {
-      new_rows.push_back(indices_[idx]);
-      new_cols.push_back(col);
-      if (indices_[idx] == col)
+      if (indices_[idx] == col) {
         has_diag = true;
+        break;
+      }
     }
-    if (!has_diag) {
-      new_rows.push_back(col);
-      new_cols.push_back(col);
-    }
+    if (!has_diag)
+      ++extra;
   }
 
-  return CSCPattern::from_triplets(n_, new_rows, new_cols);
+  if (extra == 0) {
+    return CSCPattern(n_, vector<int>(indptr_), vector<int>(indices_));
+  }
+
+  // Build new CSC directly, inserting diagonal entries in sorted position
+  int new_nnz = nnz() + extra;
+  vector<int> new_indptr(n_ + 1);
+  vector<int> new_indices(new_nnz);
+
+  int dst = 0;
+  for (int col = 0; col < n_; ++col) {
+    new_indptr[col] = dst;
+    bool has_diag = false;
+    bool diag_inserted = false;
+    for (int idx = indptr_[col]; idx < indptr_[col + 1]; ++idx) {
+      int row = indices_[idx];
+      if (!has_diag && !diag_inserted && row > col) {
+        new_indices[dst++] = col;
+        diag_inserted = true;
+      }
+      if (row == col)
+        has_diag = true;
+      new_indices[dst++] = row;
+    }
+    if (!has_diag && !diag_inserted) {
+      new_indices[dst++] = col;
+    }
+  }
+  new_indptr[n_] = dst;
+
+  return CSCPattern(n_, std::move(new_indptr), std::move(new_indices));
 }
 
 //==============================================================================

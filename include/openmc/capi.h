@@ -320,6 +320,10 @@ int openmc_properties_export(const char* filename);
 // \return Error code
 int openmc_properties_import(const char* filename);
 
+// Solve a single Bateman system using CRAM
+int openmc_cram_solve(int n, const int* indptr, const int* indices,
+  const double* data, const double* n0, double dt, int order, double* result);
+
 // Batch Bateman solve using CRAM with OpenMP parallelism
 int openmc_cram_solve_batch(int n_systems, int order, const int* dimensions,
   const int* indptr_offsets, const int* all_indptr, const int* indices_offsets,
