@@ -5,16 +5,13 @@
 
 #include <cstdlib> // for getenv
 #include <memory>  // for make_unique
-#include <queue>   // for priority_queue
 #include <string>  // for stod, stoi
-#include <tuple>   // for tuple
 
 #include <fmt/core.h>
 #include <pugixml.hpp>
 
 #include "openmc/distribution.h" // for distribution_from_xml
 #include "openmc/error.h"
-#include "openmc/particle_type.h" // for parse_gnds_nuclide
 #include "openmc/reaction.h"
 #include "openmc/xml_interface.h" // for get_node_value
 
@@ -129,155 +126,6 @@ void DepletionChain::load_xml(const std::string& filename)
     nuclides_.push_back(std::move(nuc));
   }
 
-  // Precompute derived quantities
-  compute_topo_permutation();
-  compute_decay_matrix();
-  compute_bateman_pattern();
-}
-
-void DepletionChain::compute_topo_permutation()
-{
-  int n = nuclides_.size();
-  // Build adjacency list: parent -> children (via decay and reactions)
-  vector<vector<int>> children(n);
-  vector<int> in_degree(n, 0);
-
-  for (int i = 0; i < n; ++i) {
-    const auto& nuc = *nuclides_[i];
-
-    // Decay edges
-    for (const auto& dm : nuc.decay_modes()) {
-      int j = nuclide_index(dm.target);
-      if (j >= 0) {
-        children[i].push_back(j);
-        ++in_degree[j];
-      }
-    }
-
-    // Reaction edges
-    for (const auto& rxn : nuc.transmutation_reactions()) {
-      int j = nuclide_index(rxn.target);
-      if (j >= 0) {
-        children[i].push_back(j);
-        ++in_degree[j];
-      }
-    }
-  }
-
-  // Kahn's algorithm with tie-breaking by (-A, -Z, -m) so that
-  // heavier nuclides come first in the topological ordering
-  struct ZamKey {
-    int neg_A, neg_Z, neg_m, index;
-    bool operator>(const ZamKey& o) const
-    {
-      return std::tie(neg_A, neg_Z, neg_m) >
-             std::tie(o.neg_A, o.neg_Z, o.neg_m);
-    }
-  };
-
-  // Pre-parse ZAM for all nuclides
-  vector<ZamKey> keys(n);
-  for (int i = 0; i < n; ++i) {
-    int Z = 0, A = 0, m = 0;
-    parse_gnds_nuclide(nuclides_[i]->name(), Z, A, m);
-    keys[i] = {-A, -Z, -m, i};
-  }
-
-  // Min-heap ordered by (-A,-Z,-m) so that largest A comes out first
-  std::priority_queue<ZamKey, vector<ZamKey>, std::greater<ZamKey>> pq;
-  for (int i = 0; i < n; ++i) {
-    if (in_degree[i] == 0) {
-      pq.push(keys[i]);
-    }
-  }
-
-  topo_perm_.clear();
-  topo_perm_.reserve(n);
-  while (!pq.empty()) {
-    auto [neg_A, neg_Z, neg_m, u] = pq.top();
-    pq.pop();
-    topo_perm_.push_back(u);
-    for (int v : children[u]) {
-      if (--in_degree[v] == 0) {
-        pq.push(keys[v]);
-      }
-    }
-  }
-
-  if (static_cast<int>(topo_perm_.size()) != n) {
-    warning("Depletion chain has cycles; topological sort is incomplete.");
-  }
-}
-
-void DepletionChain::compute_decay_matrix()
-{
-  int n = nuclides_.size();
-
-  // Collect COO triplets for the decay matrix
-  vector<int> rows, cols;
-  vector<double> vals;
-
-  for (int i = 0; i < n; ++i) {
-    const auto& nuc = *nuclides_[i];
-    if (nuc.stable())
-      continue;
-
-    double lambda = nuc.decay_constant();
-
-    // Diagonal: loss term
-    rows.push_back(i);
-    cols.push_back(i);
-    vals.push_back(-lambda);
-
-    // Off-diagonal: gain terms from decay
-    for (const auto& dm : nuc.decay_modes()) {
-      int j = nuclide_index(dm.target);
-      if (j >= 0) {
-        rows.push_back(j);
-        cols.push_back(i);
-        vals.push_back(lambda * dm.branching_ratio);
-      }
-    }
-  }
-
-  decay_matrix_ = CSCMatrix::from_triplets(n, rows, cols, vals);
-}
-
-void DepletionChain::compute_bateman_pattern()
-{
-  int n = nuclides_.size();
-
-  // The Bateman pattern includes every (row, col) that could ever be nonzero
-  // in the full Bateman matrix: diagonal, decay channels, and reaction channels
-  vector<int> rows, cols;
-
-  for (int i = 0; i < n; ++i) {
-    const auto& nuc = *nuclides_[i];
-
-    // Diagonal is always present (loss term from any reaction/decay)
-    rows.push_back(i);
-    cols.push_back(i);
-
-    // Decay channels
-    for (const auto& dm : nuc.decay_modes()) {
-      int j = nuclide_index(dm.target);
-      if (j >= 0) {
-        rows.push_back(j);
-        cols.push_back(i);
-      }
-    }
-
-    // Reaction channels
-    for (const auto& rxn : nuc.transmutation_reactions()) {
-      int j = nuclide_index(rxn.target);
-      if (j >= 0) {
-        rows.push_back(j);
-        cols.push_back(i);
-      }
-    }
-  }
-
-  bateman_pattern_ = CSCPattern::from_triplets(n, rows, cols);
 }
 
 //==============================================================================

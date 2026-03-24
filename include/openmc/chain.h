@@ -12,8 +12,7 @@
 
 #include "openmc/angle_energy.h"  // for AngleEnergy
 #include "openmc/distribution.h"  // for UPtrDist
-#include "openmc/memory.h"        // for unique_ptr
-#include "openmc/sparse_matrix.h" // for CSCMatrix, CSCPattern
+#include "openmc/memory.h" // for unique_ptr
 #include "openmc/vector.h"
 
 namespace openmc {
@@ -116,7 +115,7 @@ private:
 };
 
 //==============================================================================
-//! Depletion chain: owns nuclides and precomputed sparse matrices
+//! Depletion chain: owns nuclides parsed from a chain XML file
 //==============================================================================
 
 class DepletionChain {
@@ -142,30 +141,10 @@ public:
     return nuclide_map_;
   }
 
-  // --- Precomputed data ---
-
-  //! Topological permutation vector (maps new index → old index)
-  const vector<int>& topo_permutation() const { return topo_perm_; }
-
-  //! Decay matrix in the original (unpermuted) ordering
-  const CSCMatrix& decay_matrix() const { return decay_matrix_; }
-
-  //! Sparsity pattern of the Bateman matrix (union of all reaction channels)
-  const CSCPattern& bateman_pattern() const { return bateman_pattern_; }
-
 private:
-  // --- Computation helpers (called at end of load_xml) ---
-  void compute_topo_permutation();
-  void compute_decay_matrix();
-  void compute_bateman_pattern();
-
   // --- Data members ---
   vector<unique_ptr<ChainNuclide>> nuclides_;
   std::unordered_map<std::string, int> nuclide_map_;
-
-  vector<int> topo_perm_;
-  CSCMatrix decay_matrix_;
-  CSCPattern bateman_pattern_;
 };
 
 //==============================================================================
