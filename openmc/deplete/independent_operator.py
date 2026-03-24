@@ -472,7 +472,7 @@ class IndependentOperator(OpenMCOperator):
             If a timestep value is not a real number.
 
         """
-        from openmc.lib.deplete import cram_solve_batch
+        from openmc.lib.deplete import cram_solve, cram_solve_decay
         from scipy.sparse import csc_array
 
         # Determine source rates from power/power_density/source_rates
@@ -534,6 +534,9 @@ class IndependentOperator(OpenMCOperator):
         zero_rates.fill(0.0)
         decay_matrix = self.chain.form_matrix(zero_rates, fy_list[0])
 
+        # Topological permutation for fast decay solves
+        topo_perm = self.chain.topological_permutation()
+
         # Reaction-only matrices: A_rxn = A_unit - A_decay
         rxn_matrices = [m - decay_matrix for m in matrices_unit]
 
@@ -542,23 +545,22 @@ class IndependentOperator(OpenMCOperator):
                 print(f"[openmc.deplete] t={t} s, dt={dt} s, "
                       f"source={source_rate}")
 
-            # Scale precomputed matrices by source rate
-            if source_rate == 0.0:
-                matrices = [decay_matrix] * len(rxn_matrices)
-                decay_only = True
-            else:
-                matrices = [decay_matrix + source_rate * rxn
-                            for rxn in rxn_matrices]
-                decay_only = False
-
             # Build OperatorResult for saving (rates scaled by source_rate)
             scaled_rates = base_res.rates * source_rate
             res = OperatorResult(base_res.k, scaled_rates)
 
             # Solve all materials in parallel via C++
             start = time.time()
-            n_end = cram_solve_batch(matrices, n, dt, order=order,
-                                     decay_only=decay_only)
+            if source_rate == 0.0:
+                # Pure decay: use fast triangular solver
+                n_end = [cram_solve_decay(decay_matrix, n0_i, dt,
+                                          topo_perm, order=order)
+                         for n0_i in n]
+            else:
+                matrices = [decay_matrix + source_rate * rxn
+                            for rxn in rxn_matrices]
+                n_end = [cram_solve(A_i, n0_i, dt, order=order)
+                         for A_i, n0_i in zip(matrices, n)]
             proc_time = time.time() - start
 
             # Save results

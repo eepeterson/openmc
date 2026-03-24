@@ -604,6 +604,59 @@ class Chain:
             out[nuc.name] = dict(yield_obj)
         return out
 
+    def topological_permutation(self):
+        """Compute a topological permutation of the decay chain.
+
+        Returns a permutation vector ``perm`` such that ``perm[new] = old``
+        reorders the decay matrix into lower-triangular form.  Uses Kahn's
+        algorithm with tie-breaking by name so the ordering is deterministic.
+
+        Returns
+        -------
+        numpy.ndarray of int32
+            Permutation vector of length ``len(self)``.
+
+        """
+        from collections import deque
+
+        n = len(self)
+
+        # Build adjacency list: parent -> list of daughter indices
+        # In-degree counts how many parents feed into each nuclide
+        in_degree = np.zeros(n, dtype=int)
+        children = [[] for _ in range(n)]
+
+        for i, nuc in enumerate(self.nuclides):
+            if nuc.n_decay_modes == 0:
+                continue
+            for _, target, _ in nuc.decay_modes:
+                if target is not None and target in self.nuclide_dict:
+                    j = self.nuclide_dict[target]
+                    children[i].append(j)
+                    in_degree[j] += 1
+
+        # Initialize queue with zero in-degree nuclides, sorted by name
+        queue = sorted(
+            [i for i in range(n) if in_degree[i] == 0],
+            key=lambda i: self.nuclides[i].name
+        )
+        queue = deque(queue)
+
+        perm = []
+        while queue:
+            u = queue.popleft()
+            perm.append(u)
+            # Collect newly freed children, sort for determinism
+            freed = []
+            for v in children[u]:
+                in_degree[v] -= 1
+                if in_degree[v] == 0:
+                    freed.append(v)
+            freed.sort(key=lambda i: self.nuclides[i].name)
+            queue.extend(freed)
+
+        return np.array(perm, dtype=np.int32)
+
     def form_matrix(self, rates, fission_yields=None):
         """Forms depletion matrix.
 

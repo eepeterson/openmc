@@ -324,11 +324,10 @@ int openmc_properties_import(const char* filename);
 int openmc_cram_solve(int n, const int* indptr, const int* indices,
   const double* data, const double* n0, double dt, int order, double* result);
 
-// Batch Bateman solve using CRAM with OpenMP parallelism
-int openmc_cram_solve_batch(int n_systems, int order, const int* dimensions,
-  const int* indptr_offsets, const int* all_indptr, const int* indices_offsets,
-  const int* all_indices, const double* all_data, const int* n0_offsets,
-  const double* all_n0, double dt, bool decay_only, double* all_results);
+// Solve a pure-decay Bateman system using CRAM with triangular optimization
+int openmc_cram_solve_decay(int n, const int* indptr, const int* indices,
+  const double* data, const double* n0, double dt, int order,
+  const int* perm, double* result);
 
 // Error codes
 extern int OPENMC_E_UNASSIGNED;
