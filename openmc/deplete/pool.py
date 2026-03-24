@@ -2,6 +2,7 @@
 
 Provided to avoid some circular imports
 """
+import warnings
 from itertools import repeat, starmap
 from multiprocessing import Pool
 
@@ -9,6 +10,7 @@ import numpy as np
 from scipy.sparse import hstack
 
 from openmc.mpi import comm
+from openmc.lib.deplete import cram_solve_batch
 from .._sparse_compat import block_array
 
 # Configurable switch that enables / disables the use of
@@ -18,6 +20,13 @@ USE_MULTIPROCESSING = True
 # Allow user to override the number of worker processes to use for depletion
 # calculations
 NUM_PROCESSES = None
+
+_MULTIPROCESSING_DEPRECATION_MSG = (
+    "The USE_MULTIPROCESSING and NUM_PROCESSES settings in "
+    "openmc.deplete.pool are deprecated and will be removed in a future "
+    "version. Built-in CRAM solvers now use a C++ batch solver with OpenMP "
+    "parallelism, making Python multiprocessing unnecessary."
+)
 
 def _distribute(items):
     """Distribute items across MPI communicator
@@ -200,7 +209,20 @@ def deplete(func, chain, n, rates, dt, current_timestep=None, matrix_func=None,
 
     inputs = zip(matrices, n, repeat(dt))
 
-    if USE_MULTIPROCESSING:
+    # Check whether func is a built-in CRAM solver that can be dispatched
+    # to the C++ batch solver (OpenMP parallelism, no multiprocessing).
+    from .cram import CRAM16, CRAM48
+    if func is CRAM48 or func is CRAM16:
+        order = 48 if func is CRAM48 else 16
+        mat_list = list(matrices) if not isinstance(matrices, list) else matrices
+        n_result = cram_solve_batch(mat_list, n, dt, order=order)
+    elif USE_MULTIPROCESSING:
+        warnings.warn(
+            "Falling back to multiprocessing.Pool for a custom solver "
+            "callable. " + _MULTIPROCESSING_DEPRECATION_MSG,
+            FutureWarning,
+            stacklevel=2,
+        )
         with Pool(NUM_PROCESSES) as pool:
             n_result = list(pool.starmap(func, inputs))
     else:
