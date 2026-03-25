@@ -8,6 +8,8 @@
 #include <numeric>    // for iota
 #include <utility>    // for pair
 
+#include <fmt/core.h>
+
 #include "openmc/error.h"
 
 namespace openmc {
@@ -222,6 +224,67 @@ CSCMatrix CSCMatrix::permute(const vector<int>& perm) const
   }
 
   return CSCMatrix::from_triplets(n, new_rows, new_cols, new_vals);
+}
+
+CSCMatrix CSCMatrix::operator+(const CSCMatrix& other) const
+{
+  int n = pattern_.n();
+  if (other.n() != n) {
+    fatal_error(fmt::format(
+      "Cannot add CSC matrices with different dimensions ({} vs {})", n,
+      other.n()));
+  }
+
+  const auto& a_indptr = indptr();
+  const auto& a_indices = indices();
+  const auto& b_indptr = other.indptr();
+  const auto& b_indices = other.indices();
+
+  // Merge sorted row indices column-by-column
+  vector<int> new_indptr(n + 1);
+  vector<int> new_indices;
+  vector<double> new_data;
+  new_indices.reserve(nnz() + other.nnz());
+  new_data.reserve(nnz() + other.nnz());
+
+  for (int col = 0; col < n; ++col) {
+    new_indptr[col] = static_cast<int>(new_indices.size());
+    int a_start = a_indptr[col], a_end = a_indptr[col + 1];
+    int b_start = b_indptr[col], b_end = b_indptr[col + 1];
+    int ai = a_start, bi = b_start;
+
+    while (ai < a_end && bi < b_end) {
+      if (a_indices[ai] < b_indices[bi]) {
+        new_indices.push_back(a_indices[ai]);
+        new_data.push_back(data_[ai]);
+        ++ai;
+      } else if (a_indices[ai] > b_indices[bi]) {
+        new_indices.push_back(b_indices[bi]);
+        new_data.push_back(other.data_[bi]);
+        ++bi;
+      } else {
+        // Same row: sum values
+        new_indices.push_back(a_indices[ai]);
+        new_data.push_back(data_[ai] + other.data_[bi]);
+        ++ai;
+        ++bi;
+      }
+    }
+    while (ai < a_end) {
+      new_indices.push_back(a_indices[ai]);
+      new_data.push_back(data_[ai]);
+      ++ai;
+    }
+    while (bi < b_end) {
+      new_indices.push_back(b_indices[bi]);
+      new_data.push_back(other.data_[bi]);
+      ++bi;
+    }
+  }
+  new_indptr[n] = static_cast<int>(new_indices.size());
+
+  CSCPattern pattern(n, std::move(new_indptr), std::move(new_indices));
+  return CSCMatrix(std::move(pattern), std::move(new_data));
 }
 
 } // namespace openmc

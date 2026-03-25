@@ -97,6 +97,10 @@ public:
   //! \param perm Permutation vector: new_index -> old_index
   CSCMatrix permute(const vector<int>& perm) const;
 
+  //! Element-wise addition of two CSC matrices with the same dimension.
+  //! The sparsity patterns may differ; the result has the union of both.
+  CSCMatrix operator+(const CSCMatrix& other) const;
+
 private:
   CSCPattern pattern_;  //!< Structural pattern
   vector<double> data_; //!< Values [nnz]

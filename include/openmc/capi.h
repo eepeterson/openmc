@@ -336,6 +336,39 @@ int openmc_cram_solve_batch(int n_materials, const int* dims,
   const int* nnz_per_mat, const double* all_n0, double dt, int order,
   const int* perm, double* all_results);
 
+// Load a depletion chain from an XML file into the global chain object.
+// Replaces any previously loaded chain.
+int openmc_load_depletion_chain(const char* filename);
+
+// Form a depletion matrix using the globally loaded chain.
+// rates: flat [n_nucs_with_rates * n_reactions] row-major array of reaction
+//        rates for one material, indexed by (nuclide, reaction).
+// n_nucs_with_rates: number of nuclides with rate data.
+// n_reactions: number of reactions (must match chain.reactions().size() unless
+//              rx_indices is provided).
+// nuc_chain_indices: chain-nuclide index for each rate nuclide [n_nucs_with_rates].
+// n_fission_parents: number of fission-yield parents (0 = use default yields).
+// fy_parent_indices: chain index of each parent [n_fission_parents].
+// fy_product_indices: chain index of each product, packed per parent.
+// fy_yields: yield values, packed per parent (same layout as fy_product_indices).
+// fy_products_per_parent: number of products for each parent [n_fission_parents].
+// Out parameters — caller allocates:
+// out_indptr, out_indices, out_data: CSC arrays for the result.
+// out_nnz: on return, the actual number of nonzeros.
+// out_n: matrix dimension (chain size).
+// If out_indices or out_data is NULL, only out_nnz and out_n are populated
+// (query mode to discover buffer sizes).
+int openmc_chain_form_matrix(
+  const double* rates, int n_nucs_with_rates, int n_reactions,
+  const int* nuc_chain_indices,
+  int n_fission_parents,
+  const int* fy_parent_indices,
+  const int* fy_product_indices,
+  const double* fy_yields,
+  const int* fy_products_per_parent,
+  int* out_indptr, int* out_indices, double* out_data,
+  int* out_nnz, int* out_n);
+
 // Error codes
 extern int OPENMC_E_UNASSIGNED;
 extern int OPENMC_E_ALLOCATE;

@@ -5,6 +5,7 @@
 #define OPENMC_CHAIN_H
 
 #include <cmath>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -13,6 +14,7 @@
 #include "openmc/angle_energy.h"  // for AngleEnergy
 #include "openmc/distribution.h"  // for UPtrDist
 #include "openmc/memory.h" // for unique_ptr
+#include "openmc/sparse_matrix.h"
 #include "openmc/vector.h"
 
 namespace openmc {
@@ -43,6 +45,13 @@ public:
     double branching_ratio; //!< Branching ratio
   };
 
+  //! Fission yield data at one or more energies
+  struct FissionYieldData {
+    vector<double> energies;            //!< Energies in [eV], sorted
+    vector<std::string> products;       //!< Product nuclide names, sorted
+    vector<vector<double>> yield_matrix; //!< yield_matrix[i_energy][i_product]
+  };
+
   // Constructors
   explicit ChainNuclide(pugi::xml_node node);
 
@@ -57,6 +66,18 @@ public:
 
   //! Whether this nuclide is stable (infinite half-life)
   bool stable() const { return half_life_ == 0.0; }
+
+  //! Whether this nuclide has fission yield data
+  bool has_fission_yields() const { return fission_yields_.has_value(); }
+
+  //! Get fission yield data (must check has_fission_yields() first)
+  const FissionYieldData& fission_yields() const { return *fission_yields_; }
+
+  //! Set fission yield data (used for borrowed yields)
+  void set_fission_yields(const FissionYieldData& fyd)
+  {
+    fission_yields_ = fyd;
+  }
 
   const Distribution* photon_energy() const { return photon_energy_.get(); }
 
@@ -81,6 +102,7 @@ private:
   UPtrDist photon_energy_;                      //!< Decay photon distribution
   vector<DecayMode> decay_modes_;               //!< Decay modes with targets
   vector<TransmutationRxn> transmutation_rxns_; //!< Transmutation reactions
+  std::optional<FissionYieldData> fission_yields_; //!< Fission product yields
 };
 
 //==============================================================================
@@ -141,10 +163,81 @@ public:
     return nuclide_map_;
   }
 
+  //! List of unique reaction types present in the chain (e.g. "(n,gamma)",
+  //! "fission"). Populated during load_xml.
+  const vector<std::string>& reactions() const { return reactions_; }
+
+  //! Map from reaction type string to index in reactions()
+  const std::unordered_map<std::string, int>& reaction_map() const
+  {
+    return reaction_map_;
+  }
+
+  //! Get the cached decay matrix. Built once during load_xml() and reused
+  //! for every material/timestep. Contains diagonal loss terms and
+  //! off-diagonal gain terms (branching ratios, alpha/proton production)
+  //! from radioactive decay only.
+  const CSCMatrix& decay_matrix() const { return decay_matrix_; }
+
+  //! Form the reaction-rate portion of the transmutation matrix.
+  //!
+  //! Builds only the terms that depend on reaction rates: transmutation
+  //! loss/gain and fission product yields. Does not include radioactive
+  //! decay terms (see decay_matrix()).
+  //!
+  //! \param rates  2D rate array [n_nucs_with_rates, n_reactions].
+  //! \param n_nucs_with_rates  Number of nuclides in the rates array.
+  //! \param n_reactions  Number of reactions (columns) in the rates array.
+  //! \param nuc_to_chain_idx  Mapping from rate-array nuclide index to chain
+  //!                          nuclide index. Size n_nucs_with_rates.
+  //! \param fission_yields  Map of parent chain index -> {product chain index
+  //!                        -> yield}. If empty, default yields from chain XML
+  //!                        are used.
+  //! \return CSCMatrix representing the reaction-rate terms.
+  CSCMatrix form_rxn_matrix(
+    const double* rates,
+    int n_nucs_with_rates,
+    int n_reactions,
+    const int* nuc_to_chain_idx,
+    const std::unordered_map<int, std::unordered_map<int, double>>&
+      fission_yields = {}) const;
+
+  //! Form the full depletion matrix (decay + reaction rates).
+  //!
+  //! Equivalent to decay_matrix() + form_rxn_matrix(...).
+  //!
+  //! \param rates  2D rate array [n_nucs_with_rates, n_reactions].
+  //! \param n_nucs_with_rates  Number of nuclides in the rates array.
+  //! \param n_reactions  Number of reactions (columns) in the rates array.
+  //! \param nuc_to_chain_idx  Mapping from rate-array nuclide index to chain
+  //!                          nuclide index. Size n_nucs_with_rates.
+  //! \param fission_yields  Map of parent chain index -> {product chain index
+  //!                        -> yield}. If empty, default yields from chain XML
+  //!                        are used.
+  //! \return CSCMatrix representing the full depletion matrix.
+  CSCMatrix form_matrix(
+    const double* rates,
+    int n_nucs_with_rates,
+    int n_reactions,
+    const int* nuc_to_chain_idx,
+    const std::unordered_map<int, std::unordered_map<int, double>>&
+      fission_yields = {}) const;
+
+  //! Get default fission yields (lowest energy) for all nuclides with yield
+  //! data. Returns map of parent chain index -> {product chain index -> yield}.
+  std::unordered_map<int, std::unordered_map<int, double>>
+  get_default_fission_yields() const;
+
 private:
+  //! Build the decay matrix from current nuclide data and cache it.
+  void build_decay_matrix();
+
   // --- Data members ---
   vector<unique_ptr<ChainNuclide>> nuclides_;
   std::unordered_map<std::string, int> nuclide_map_;
+  vector<std::string> reactions_;
+  std::unordered_map<std::string, int> reaction_map_;
+  CSCMatrix decay_matrix_; //!< Cached decay-only transmutation matrix
 };
 
 //==============================================================================
