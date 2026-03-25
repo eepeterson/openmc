@@ -126,10 +126,8 @@ def _collect_all_transport(steps):
 # ---------------------------------------------------------------------------
 
 def test_predictor_structure():
-    assert predictor.num_transports == 1
-    assert predictor.num_expm == 1
-    assert not predictor.uses_prev_step
-    assert not predictor.is_si
+    assert len(_collect(predictor.steps, Transport)) == 1
+    assert len(_collect(predictor.steps, Expm)) == 1
     assert predictor.fallback is None
 
 
@@ -148,10 +146,8 @@ def test_predictor_graph():
 # ---------------------------------------------------------------------------
 
 def test_cecm_structure():
-    assert cecm.num_transports == 2
-    assert cecm.num_expm == 2
-    assert not cecm.uses_prev_step
-    assert not cecm.is_si
+    assert len(_collect(cecm.steps, Transport)) == 2
+    assert len(_collect(cecm.steps, Expm)) == 2
 
 
 def test_cecm_graph():
@@ -180,10 +176,8 @@ def test_cecm_graph():
 # ---------------------------------------------------------------------------
 
 def test_celi_structure():
-    assert celi.num_transports == 2
-    assert celi.num_expm == 3
-    assert not celi.uses_prev_step
-    assert not celi.is_si
+    assert len(_collect(celi.steps, Transport)) == 2
+    assert len(_collect(celi.steps, Expm)) == 3
 
 
 def test_celi_graph():
@@ -225,10 +219,8 @@ def test_celi_corrector_weights_sum():
 # ---------------------------------------------------------------------------
 
 def test_cf4_structure():
-    assert cf4.num_transports == 4
-    assert cf4.num_expm == 5
-    assert not cf4.uses_prev_step
-    assert not cf4.is_si
+    assert len(_collect(cf4.steps, Transport)) == 4
+    assert len(_collect(cf4.steps, Expm)) == 5
 
 
 def test_cf4_graph():
@@ -300,10 +292,8 @@ def test_cf4_final_weights():
 # ---------------------------------------------------------------------------
 
 def test_epc_rk4_structure():
-    assert epc_rk4.num_transports == 4
-    assert epc_rk4.num_expm == 4
-    assert not epc_rk4.uses_prev_step
-    assert not epc_rk4.is_si
+    assert len(_collect(epc_rk4.steps, Transport)) == 4
+    assert len(_collect(epc_rk4.steps, Expm)) == 4
 
 
 def test_epc_rk4_graph():
@@ -336,10 +326,8 @@ def test_epc_rk4_weights_sum():
 # ---------------------------------------------------------------------------
 
 def test_leqi_structure():
-    assert leqi.num_transports == 2
-    assert leqi.num_expm == 4
-    assert leqi.uses_prev_step
-    assert not leqi.is_si
+    assert len(_collect(leqi.steps, Transport)) == 2
+    assert len(_collect(leqi.steps, Expm)) == 4
     assert leqi.fallback is celi
 
 
@@ -404,10 +392,9 @@ def test_leqi_graph_density_chaining():
 # ---------------------------------------------------------------------------
 
 def test_si_celi_structure():
-    assert si_celi.num_transports == 1  # only A_0 at top level
-    assert si_celi.num_expm == 1        # only n_pred at top level
-    assert si_celi.is_si
-    assert not si_celi.uses_prev_step
+    assert len(_collect(si_celi.steps, Transport)) == 1  # only A_0 at top level
+    assert len(_collect(si_celi.steps, Expm)) == 1        # only n_pred at top level
+    assert any(isinstance(op, Iterate) for op in si_celi.steps)
     assert si_celi.fallback is None
 
 
@@ -467,8 +454,7 @@ def test_si_celi_corrector_weights_sum():
 # ---------------------------------------------------------------------------
 
 def test_si_leqi_structure():
-    assert si_leqi.is_si
-    assert si_leqi.uses_prev_step
+    assert any(isinstance(op, Iterate) for op in si_leqi.steps)
     assert si_leqi.fallback is si_celi
 
 
@@ -503,35 +489,11 @@ def test_si_leqi_le_predictor():
 # IntegrationScheme properties
 # ---------------------------------------------------------------------------
 
-def test_uses_prev_step_false():
-    for s in (predictor, cecm, celi, cf4, epc_rk4, si_celi):
-        assert not s.uses_prev_step
-
-
-def test_uses_prev_step_true():
-    for s in (leqi, si_leqi):
-        assert s.uses_prev_step
-
-
-def test_is_si():
-    for s in (predictor, cecm, celi, cf4, epc_rk4, leqi):
-        assert not s.is_si
-    for s in (si_celi, si_leqi):
-        assert s.is_si
-
-
 def test_fallback():
     assert leqi.fallback is celi
     assert si_leqi.fallback is si_celi
     for s in (predictor, cecm, celi, cf4, epc_rk4, si_celi):
         assert s.fallback is None
-
-
-def test_first_transport():
-    for s in SCHEMES.values():
-        t = s.first_transport
-        assert isinstance(t, Transport)
-        assert t.density is BOS
 
 
 def test_frozen_scheme():

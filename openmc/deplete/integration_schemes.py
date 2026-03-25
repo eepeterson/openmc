@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Union
 
 __all__ = [
     "BOS", "PREV_STEP", "PREV_ITER",
@@ -56,12 +55,6 @@ PREV_STEP = _Sentinel('PREV_STEP')
 
 #: Density vector from the last Expm in the previous SI iteration.
 PREV_ITER = _Sentinel('PREV_ITER')
-
-# Type alias for density references accepted by Transport and Expm.
-DensityRef = Union[_Sentinel, 'Expm']
-
-# Type alias for matrix references accepted by MatrixTerm.
-MatrixRef = Union['Transport', 'AverageMatrix', _Sentinel]
 
 
 # ---- Node types ----
@@ -219,48 +212,6 @@ class IntegrationScheme:
     name: str
     steps: tuple
     fallback: IntegrationScheme | None = None
-
-    @property
-    def num_transports(self) -> int:
-        """Number of ``Transport`` operations at the top level."""
-        return sum(1 for op in self.steps if isinstance(op, Transport))
-
-    @property
-    def num_expm(self) -> int:
-        """Number of ``Expm`` operations at the top level."""
-        return sum(1 for op in self.steps if isinstance(op, Expm))
-
-    @property
-    def uses_prev_step(self) -> bool:
-        """Whether this scheme references :data:`PREV_STEP`."""
-        return self._has_ref(PREV_STEP)
-
-    @property
-    def is_si(self) -> bool:
-        """Whether this scheme contains an :class:`Iterate` block."""
-        return any(isinstance(op, Iterate) for op in self.steps)
-
-    @property
-    def first_transport(self) -> Transport | None:
-        """The first ``Transport`` node, or ``None``."""
-        for op in self.steps:
-            if isinstance(op, Transport):
-                return op
-        return None
-
-    def _has_ref(self, sentinel) -> bool:
-        """Check if any MatrixTerm in the scheme references the sentinel."""
-        def _check_terms(steps):
-            for op in steps:
-                if isinstance(op, Expm):
-                    for term in op.terms:
-                        if term.matrix is sentinel:
-                            return True
-                elif isinstance(op, Iterate):
-                    if _check_terms(op.body):
-                        return True
-            return False
-        return _check_terms(self.steps)
 
 
 # ---------------------------------------------------------------------------
