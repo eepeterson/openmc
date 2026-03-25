@@ -42,10 +42,9 @@ class DepletionStage:
         rates array; a callable receives ``(prev_dt, dt)`` and returns the
         tuple.
 
-        When :attr:`IntegratorScheme.uses_prev_rates` is ``False``, the rates
-        array is ``[bos_rates, eval_0_rates, eval_1_rates, ...]``.
-        When ``True``, the array is
-        ``[prev_step_rates, bos_rates, eval_0_rates, ...]``.
+        The rates array is ``[bos_rates, eval_0_rates, eval_1_rates, ...]``.
+        When weights are callable (indicating the scheme needs previous-step
+        rates), the rates array is prepended with ``prev_step_rates``.
     evaluate : bool
         If ``True``, a transport solve is performed at the resulting
         composition to produce new reaction rates.
@@ -67,14 +66,6 @@ class IntegratorScheme:
         Identifier for the scheme (e.g. ``'cecm'``, ``'cf4'``).
     stages : tuple of DepletionStage
         Ordered depletion sub-steps.
-    uses_prev_rates : bool
-        Whether the scheme requires BOS rates from the *previous* time step.
-        When ``True``, the rates array gains a leading element for the
-        previous-step rates.
-    fallback : str or None
-        Name of another scheme (looked up in :data:`SCHEMES`) to use when
-        ``uses_prev_rates`` is ``True`` but no previous rates exist (first
-        step without restart data).
     n_iterations : int
         Stochastic-implicit (SI) iteration count.  ``1`` (default) means
         no SI.  Values > 1 cause the corrector stages to be iterated with
@@ -84,8 +75,6 @@ class IntegratorScheme:
 
     name: str
     stages: tuple[DepletionStage, ...]
-    uses_prev_rates: bool = False
-    fallback: str | None = None
     n_iterations: int = 1
 
     def __post_init__(self):
@@ -93,11 +82,6 @@ class IntegratorScheme:
             raise ValueError(
                 f"Scheme '{self.name}' has no corrector stages; "
                 "n_iterations > 1 requires stages after the last evaluation"
-            )
-        if self.fallback is not None and not self.uses_prev_rates:
-            raise ValueError(
-                f"Scheme '{self.name}' specifies a fallback but does not use "
-                "previous rates"
             )
 
     @property
@@ -112,6 +96,11 @@ class IntegratorScheme:
             if self.stages[i].evaluate:
                 return i + 1 if i + 1 < len(self.stages) else None
         return None
+
+    @property
+    def uses_prev_rates(self) -> bool:
+        """Whether any stage has callable weights requiring previous rates."""
+        return any(callable(s.weights) for s in self.stages)
 
     @property
     def num_evaluations(self) -> int:
@@ -223,12 +212,11 @@ epc_rk4 = IntegratorScheme(
 )
 
 #: LE/QI CFQ4: linear extrapolation predictor, quadratic interpolation
-#: corrector.  Falls back to CE/LI on the first step.
+#: corrector.  On the first step (no previous rates), the driver falls
+#: back to a constant-weight scheme such as CE/LI.
 leqi = IntegratorScheme(
     name='leqi',
     stages=_leqi_stages,
-    uses_prev_rates=True,
-    fallback='celi',
 )
 
 #: SI-CE/LI: stochastic implicit variant of CE/LI.
@@ -242,8 +230,6 @@ si_celi = IntegratorScheme(
 si_leqi = IntegratorScheme(
     name='si_leqi',
     stages=_leqi_stages,
-    uses_prev_rates=True,
-    fallback='si_celi',
     n_iterations=10,
 )
 

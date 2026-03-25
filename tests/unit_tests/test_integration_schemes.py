@@ -115,7 +115,6 @@ def test_leqi_structure():
     assert len(leqi.stages) == 4
     assert leqi.num_evaluations == 1
     assert leqi.uses_prev_rates is True
-    assert leqi.fallback == 'celi'
     assert leqi.corrector_start == 2
 
 
@@ -187,7 +186,6 @@ def test_si_leqi_params():
     assert si_leqi.n_iterations == 10
     assert si_leqi.corrector_start == 2
     assert si_leqi.uses_prev_rates is True
-    assert si_leqi.fallback == 'si_celi'
 
 
 def test_si_requires_corrector():
@@ -200,13 +198,13 @@ def test_si_requires_corrector():
         )
 
 
-def test_fallback_requires_prev_rates():
-    with pytest.raises(ValueError, match="fallback"):
-        IntegratorScheme(
-            name='bad',
-            stages=predictor.stages,
-            fallback='celi',
-        )
+def test_predictor_does_not_use_prev_rates():
+    """Schemes with only constant weights don't need previous rates."""
+    assert predictor.uses_prev_rates is False
+    assert cecm.uses_prev_rates is False
+    assert celi.uses_prev_rates is False
+    assert cf4.uses_prev_rates is False
+    assert epc_rk4.uses_prev_rates is False
 
 
 def test_frozen():
