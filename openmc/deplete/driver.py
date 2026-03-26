@@ -12,7 +12,6 @@ Heavy lifting (matrix assembly and CRAM solves) is delegated to C++ via
 
 from __future__ import annotations
 
-import copy
 import time
 import warnings
 from pathlib import Path
@@ -59,8 +58,18 @@ _TIMESTEP_UNITS = {
 }
 
 
+_nuclides_with_data_cache = None
+
+
 def _get_nuclides_with_data():
-    """Return set of nuclide names that have neutron cross-section data."""
+    """Return set of nuclide names that have neutron cross-section data.
+
+    Results are cached at module level since the cross-section library
+    does not change during a session.
+    """
+    global _nuclides_with_data_cache
+    if _nuclides_with_data_cache is not None:
+        return _nuclides_with_data_cache
     cross_sections = openmc.config.get("cross_sections")
     if cross_sections is None:
         return set()
@@ -68,6 +77,7 @@ def _get_nuclides_with_data():
     for lib in DataLibrary.from_xml(cross_sections).libraries:
         if lib['type'] == 'neutron':
             nuclides.update(lib['materials'])
+    _nuclides_with_data_cache = nuclides
     return nuclides
 
 
@@ -239,6 +249,12 @@ class DepletionDriver:
         # Re-load the depletion chain into C++ (openmc.lib.finalize()
         # clears the global chain, so we must reload after each init).
         load_depletion_chain(str(self._chain_file))
+
+        # Enable pre-computation of depletion reaction cross sections
+        # during transport.  Without this flag, tally scoring falls back
+        # to expensive on-the-fly cross-section lookups for every
+        # nuclide × reaction bin.
+        openmc.lib.settings.need_depletion_rx = True
 
         # Identify depletable materials
         self._burn_mat_ids = []
@@ -748,15 +764,35 @@ class DepletionDriver:
             for j, nuc in enumerate(nuc_list):
                 res.data[i, j] = n_eos_list[i][j]
 
-        # Set up empty reaction rates (required by StepResult HDF5 format)
+        # Populate reaction rates from the last transport tally.
+        # Rates are stored as (reactions/src * b-cm / atom) per the
+        # convention used by the existing integrator framework.
         rates = ReactionRates(
             burn_list,
             nuc_list,
             self._reactions,
         )
+        if self._cached_rxn_matrices is not None:
+            tally_means = self._rate_tally.mean
+            n_mats = len(self._burn_mat_ids)
+            n_tallied = len(self._tally_nuclides)
+            n_rxns = len(self._reactions)
+            if n_tallied > 0:
+                tally_means = tally_means.reshape(n_mats, n_tallied, n_rxns)
+                for i, mat_id in enumerate(burn_list):
+                    mat_idx = rates.index_mat[mat_id]
+                    for j, name in enumerate(self._tally_nuclides):
+                        if name not in rates.index_nuc:
+                            continue
+                        nuc_idx = rates.index_nuc[name]
+                        for k, rx in enumerate(self._reactions):
+                            rx_idx = rates.index_rx[rx]
+                            rates[mat_idx, nuc_idx, rx_idx] = \
+                                tally_means[i, j, k]
         res.rates = rates
 
-        res.export_to_hdf5(str(self._output_path), step_idx)
+        res.export_to_hdf5(str(self._output_path), step_idx,
+                           write_rates=True)
 
     # ------------------------------------------------------------------
     # Public API
