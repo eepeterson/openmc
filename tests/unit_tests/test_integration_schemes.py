@@ -392,17 +392,19 @@ def test_leqi_graph_density_chaining():
 # ---------------------------------------------------------------------------
 
 def test_si_celi_structure():
-    assert len(_collect(si_celi.steps, Transport)) == 1  # only A_0 at top level
-    assert len(_collect(si_celi.steps, Expm)) == 1        # only n_pred at top level
-    assert any(isinstance(op, Iterate) for op in si_celi.steps)
-    assert si_celi.fallback is None
+    scheme = si_celi()
+    assert len(_collect(scheme.steps, Transport)) == 1  # only A_0 at top level
+    assert len(_collect(scheme.steps, Expm)) == 1        # only n_pred at top level
+    assert any(isinstance(op, Iterate) for op in scheme.steps)
+    assert scheme.fallback is None
 
 
 def test_si_celi_iterate():
-    iterates = [op for op in si_celi.steps if isinstance(op, Iterate)]
+    scheme = si_celi()
+    iterates = [op for op in scheme.steps if isinstance(op, Iterate)]
     assert len(iterates) == 1
     it = iterates[0]
-    assert it.n_iterations == 11
+    assert it.n_iterations == 10
 
     # Body has: Transport(PREV_ITER), Expm, Expm
     assert len(it.body) == 3
@@ -415,9 +417,17 @@ def test_si_celi_iterate():
     assert isinstance(n_corr2, Expm)
 
 
+def test_si_celi_custom_iterations():
+    """Factory allows overriding the number of SI iterations."""
+    scheme = si_celi(n_iterations=5)
+    it = [op for op in scheme.steps if isinstance(op, Iterate)][0]
+    assert it.n_iterations == 5
+
+
 def test_si_celi_iterate_uses_average():
     """Expm nodes inside SI iterate reference AverageMatrix."""
-    it = [op for op in si_celi.steps if isinstance(op, Iterate)][0]
+    scheme = si_celi()
+    it = [op for op in scheme.steps if isinstance(op, Iterate)][0]
     n_corr1, n_corr2 = it.body[1], it.body[2]
     for e in (n_corr1, n_corr2):
         avg_terms = [t for t in e.terms if isinstance(t.matrix, AverageMatrix)]
@@ -426,8 +436,9 @@ def test_si_celi_iterate_uses_average():
 
 def test_si_celi_corrector_weights():
     """SI-CE/LI uses same 5/12, 1/12 weights as CE/LI corrector."""
-    top_transport = _collect(si_celi.steps, Transport)[0]  # A_0
-    it = [op for op in si_celi.steps if isinstance(op, Iterate)][0]
+    scheme = si_celi()
+    top_transport = _collect(scheme.steps, Transport)[0]  # A_0
+    it = [op for op in scheme.steps if isinstance(op, Iterate)][0]
     n_corr1, n_corr2 = it.body[1], it.body[2]
 
     # n_corr1: 5/12 * A_0 + 1/12 * A_avg
@@ -444,7 +455,8 @@ def test_si_celi_corrector_weights():
 
 
 def test_si_celi_corrector_weights_sum():
-    it = [op for op in si_celi.steps if isinstance(op, Iterate)][0]
+    scheme = si_celi()
+    it = [op for op in scheme.steps if isinstance(op, Iterate)][0]
     for e in it.body[1:]:
         assert sum(t.weight for t in e.terms) == pytest.approx(0.5)
 
@@ -454,22 +466,36 @@ def test_si_celi_corrector_weights_sum():
 # ---------------------------------------------------------------------------
 
 def test_si_leqi_structure():
-    assert any(isinstance(op, Iterate) for op in si_leqi.steps)
-    assert si_leqi.fallback is si_celi
+    scheme = si_leqi()
+    assert any(isinstance(op, Iterate) for op in scheme.steps)
+    assert scheme.fallback.name == 'si_celi'
 
 
 def test_si_leqi_iterate():
-    iterates = [op for op in si_leqi.steps if isinstance(op, Iterate)]
+    scheme = si_leqi()
+    iterates = [op for op in scheme.steps if isinstance(op, Iterate)]
     assert len(iterates) == 1
     it = iterates[0]
-    assert it.n_iterations == 11
+    assert it.n_iterations == 10
     assert len(it.body) == 3
     assert isinstance(it.body[0], Transport)
     assert it.body[0].density is PREV_ITER
 
 
+def test_si_leqi_custom_iterations():
+    """Factory allows overriding the number of SI iterations."""
+    scheme = si_leqi(n_iterations=20)
+    it = [op for op in scheme.steps if isinstance(op, Iterate)][0]
+    assert it.n_iterations == 20
+    # Fallback should use default iterations
+    fallback_it = [op for op in scheme.fallback.steps
+                   if isinstance(op, Iterate)][0]
+    assert fallback_it.n_iterations == 10
+
+
 def test_si_leqi_iterate_uses_average():
-    it = [op for op in si_leqi.steps if isinstance(op, Iterate)][0]
+    scheme = si_leqi()
+    it = [op for op in scheme.steps if isinstance(op, Iterate)][0]
     for e in it.body[1:]:
         avg_terms = [t for t in e.terms if isinstance(t.matrix, AverageMatrix)]
         assert len(avg_terms) == 1
@@ -477,7 +503,8 @@ def test_si_leqi_iterate_uses_average():
 
 def test_si_leqi_le_predictor():
     """SI-LE/QI has two Expm before the Iterate (the LE predictor)."""
-    expms = _collect(si_leqi.steps, Expm)
+    scheme = si_leqi()
+    expms = _collect(scheme.steps, Expm)
     assert len(expms) == 2  # n_inter, n_pred at top level
     for e in expms:
         # All top-level Expm have callable weights (LE part)
@@ -491,8 +518,9 @@ def test_si_leqi_le_predictor():
 
 def test_fallback():
     assert leqi.fallback is celi
-    assert si_leqi.fallback is si_celi
-    for s in (predictor, cecm, celi, cf4, epc_rk4, si_celi):
+    assert si_leqi().fallback.name == 'si_celi'
+    assert si_celi().fallback is None
+    for s in (predictor, cecm, celi, cf4, epc_rk4):
         assert s.fallback is None
 
 

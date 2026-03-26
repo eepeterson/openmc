@@ -369,6 +369,19 @@ int openmc_chain_form_matrix(
   int* out_indptr, int* out_indices, double* out_data,
   int* out_nnz, int* out_n);
 
+// Like openmc_chain_form_matrix but returns only the reaction-rate terms
+// (no decay contributions).
+int openmc_chain_form_rxn_matrix(
+  const double* rates, int n_nucs_with_rates, int n_reactions,
+  const int* nuc_chain_indices,
+  int n_fission_parents,
+  const int* fy_parent_indices,
+  const int* fy_product_indices,
+  const double* fy_yields,
+  const int* fy_products_per_parent,
+  int* out_indptr, int* out_indices, double* out_data,
+  int* out_nnz, int* out_n);
+
 // Error codes
 extern int OPENMC_E_UNASSIGNED;
 extern int OPENMC_E_ALLOCATE;

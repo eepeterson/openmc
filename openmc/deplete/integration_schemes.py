@@ -339,7 +339,19 @@ def _build_leqi(celi_scheme):
         fallback=celi_scheme)
 
 # ---- SI-CE/LI ----
-def _build_si_celi():
+def si_celi(n_iterations=10):
+    """Create an SI-CE/LI integration scheme.
+
+    Parameters
+    ----------
+    n_iterations : int
+        Number of stochastic-implicit corrector iterations.
+
+    Returns
+    -------
+    IntegrationScheme
+
+    """
     A_0 = Transport(BOS)
     n_pred = Expm((1.0 * A_0,), BOS)
     A_iter = Transport(PREV_ITER)
@@ -348,11 +360,23 @@ def _build_si_celi():
     n_corr2 = Expm((1/12 * A_0, 5/12 * A_avg), n_corr1)
     return IntegrationScheme('si_celi', steps=(
         A_0, n_pred,
-        Iterate(n_iterations=11, body=(A_iter, n_corr1, n_corr2)),
+        Iterate(n_iterations=n_iterations, body=(A_iter, n_corr1, n_corr2)),
     ))
 
 # ---- SI-LE/QI ----
-def _build_si_leqi(si_celi_scheme):
+def si_leqi(n_iterations=10):
+    """Create an SI-LE/QI integration scheme.
+
+    Parameters
+    ----------
+    n_iterations : int
+        Number of stochastic-implicit corrector iterations.
+
+    Returns
+    -------
+    IntegrationScheme
+
+    """
     A_0 = Transport(BOS)
     # LE predictor
     n_inter = Expm((
@@ -378,23 +402,23 @@ def _build_si_leqi(si_celi_scheme):
     ), n_corr1)
     return IntegrationScheme('si_leqi',
         steps=(A_0, n_inter, n_pred,
-               Iterate(n_iterations=11, body=(A_iter, n_corr1, n_corr2))),
-        fallback=si_celi_scheme)
+               Iterate(n_iterations=n_iterations, body=(A_iter, n_corr1, n_corr2))),
+        fallback=si_celi())
 
 
-# Build all scheme instances
+# Build non-SI scheme instances
 predictor = _build_predictor()
 cecm = _build_cecm()
 celi = _build_celi()
 cf4 = _build_cf4()
 epc_rk4 = _build_epc_rk4()
 leqi = _build_leqi(celi)
-si_celi = _build_si_celi()
-si_leqi = _build_si_leqi(si_celi)
 
 #: Registry mapping scheme names to :class:`IntegrationScheme` instances.
+#: SI schemes are built with default parameters; use the :func:`si_celi` and
+#: :func:`si_leqi` factories directly to customize ``n_iterations``.
 SCHEMES: dict[str, IntegrationScheme] = {
     s.name: s for s in (
-        predictor, cecm, celi, cf4, epc_rk4, leqi, si_celi, si_leqi
+        predictor, cecm, celi, cf4, epc_rk4, leqi, si_celi(), si_leqi()
     )
 }
