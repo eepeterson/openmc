@@ -272,6 +272,8 @@ class DepletionDriver:
                     raise RuntimeError(
                         f"Volume not specified for depletable material "
                         f"with ID={mat.id}.")
+                cv.check_greater_than('volume', mat.volume, 0.0,
+                                      equality=False)
                 self._volumes[mat_id_str] = mat.volume
                 heavy_metal_mass += mat.fissionable_mass
 
@@ -353,8 +355,11 @@ class DepletionDriver:
     # Transport dispatch
     # ------------------------------------------------------------------
 
-    def _run_transport_and_extract(self, densities_per_mat):
-        """Run OpenMC transport and extract reaction-rate matrices.
+    def _update_materials(self, densities_per_mat):
+        """Push atom counts into C library materials for transport.
+
+        Updates material compositions and the tally nuclide list so that
+        only nuclides with nonzero density are scored.
 
         Parameters
         ----------
@@ -362,19 +367,7 @@ class DepletionDriver:
             Atom counts (not densities) for each burnable material,
             indexed by chain nuclide.
 
-        Returns
-        -------
-        rxn_matrices : list of csc_array
-            Reaction-rate matrices A_rxn for each material.
-        k_eff : float
-            Effective multiplication factor.
-        fission_energy : float
-            Total fission energy in eV per source particle across all
-            materials.
-
         """
-        # Update material compositions (only nuclides with cross-section data)
-        # and track which nuclides have nonzero density across all materials.
         nonzero_nucs = set()
         for i, mat_id in enumerate(self._burn_mat_ids):
             vol = self._volumes[mat_id]
@@ -402,19 +395,32 @@ class DepletionDriver:
         self._tally_nuc_chain_idx = nuc_chain_idx
         self._rate_tally.nuclides = nuc_names
 
-        # Run transport
-        openmc.lib.reset()
-        openmc.lib.run()
+    def _extract_rates(self, densities_per_mat):
+        """Extract reaction-rate matrices and fission energy from tallies.
 
-        # Extract k_eff from last statepoint
-        k_eff = openmc.lib.keff()[0]
+        Must be called after a transport run has completed and tally
+        results are available.
 
+        Parameters
+        ----------
+        densities_per_mat : list of numpy.ndarray
+            Atom counts for each burnable material (same as passed to
+            :meth:`_update_materials`).
+
+        Returns
+        -------
+        rxn_matrices : list of csc_array
+            Reaction-rate matrices ``A_rxn`` for each material.
+        fission_energy : float
+            Total fission energy in eV per source particle across all
+            materials.
+
+        """
         # Extract tally results
         tally_means = self._rate_tally.mean
         n_mats = len(self._burn_mat_ids)
         n_nucs = len(self._tally_nuclides)
         n_rxns = len(self._reactions)
-        # Reshape: (n_mats, n_nucs, n_rxns)
         tally_means = tally_means.reshape(n_mats, n_nucs, n_rxns)
 
         # Energy deposition tally
@@ -423,7 +429,10 @@ class DepletionDriver:
         else:
             heating_means = None
 
-        # For each material: form A_rxn, accumulate fission energy
+        # Determine fission score index once
+        fission_idx = (self._reactions.index('fission')
+                       if 'fission' in self._reactions else None)
+
         rxn_matrices = []
         total_fission_energy = 0.0
 
@@ -438,15 +447,14 @@ class DepletionDriver:
             vol_b_cm = vol * 1e24
             rates_per_atom = rates / vol_b_cm
 
-            # Accumulate fission energy
-            fission_idx = (self._reactions.index('fission')
-                           if 'fission' in self._reactions else None)
+            # Accumulate fission energy [eV/src]
             if self._normalization_mode == 'fission-q' and fission_idx is not None:
                 for j, name in enumerate(self._tally_nuclides):
                     chain_idx = self._chain.nuclide_dict[name]
                     atom_per_bcm = n_atoms[chain_idx] / vol_b_cm
                     fission_rate = rates[j, fission_idx] * atom_per_bcm
-                    total_fission_energy += fission_rate * self._fission_q[chain_idx]
+                    total_fission_energy += (
+                        fission_rate * self._fission_q[chain_idx])
             elif self._normalization_mode == 'energy-deposition':
                 total_fission_energy += heating_means[i]
 
@@ -455,7 +463,37 @@ class DepletionDriver:
                 rates_per_atom, self._tally_nuc_chain_idx, n_rxns)
             rxn_matrices.append(A_rxn)
 
-        return rxn_matrices, k_eff, total_fission_energy
+        return rxn_matrices, total_fission_energy
+
+    def _run_transport_and_extract(self, densities_per_mat):
+        """Run OpenMC transport and extract reaction-rate matrices.
+
+        Parameters
+        ----------
+        densities_per_mat : list of numpy.ndarray
+            Atom counts (not densities) for each burnable material,
+            indexed by chain nuclide.
+
+        Returns
+        -------
+        rxn_matrices : list of csc_array
+            Reaction-rate matrices A_rxn for each material.
+        k_eff : float
+            Effective multiplication factor.
+        fission_energy : float
+            Total fission energy in eV per source particle across all
+            materials.
+
+        """
+        self._update_materials(densities_per_mat)
+
+        openmc.lib.reset()
+        openmc.lib.run()
+
+        k_eff = openmc.lib.keff()[0]
+        rxn_matrices, fission_energy = self._extract_rates(densities_per_mat)
+
+        return rxn_matrices, k_eff, fission_energy
 
     def _handle_transport(self, node, densities, matrices, source_rate):
         """Process a Transport node.
@@ -496,6 +534,12 @@ class DepletionDriver:
         else:
             # source_rate is power in Watts
             if fission_energy == 0.0:
+                warnings.warn(
+                    "Fission energy from transport is zero but power "
+                    "normalization was requested.  The source "
+                    "normalization factor will be set to zero, meaning "
+                    "only radioactive decay will be applied this step.",
+                    stacklevel=2)
                 s = 0.0
             else:
                 s = source_rate / (fission_energy * EV_PER_JOULE)
@@ -809,10 +853,10 @@ class DepletionDriver:
         """
         from .results import Results
 
-        if not self._initialized:
-            self._initialize()
-
         try:
+            if not self._initialized:
+                self._initialize()
+
             n = self._get_initial_compositions()
             prev_bos_matrices = None
             prev_dt = None
