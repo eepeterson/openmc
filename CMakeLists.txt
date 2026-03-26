@@ -366,6 +366,7 @@ list(APPEND libopenmc_SOURCES
   src/cross_sections.cpp
   src/dagmc.cpp
   src/depletion.cpp
+  src/depletion_scheme.cpp
   src/distribution.cpp
   src/distribution_angle.cpp
   src/distribution_energy.cpp

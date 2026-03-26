@@ -1,5 +1,6 @@
 set(TEST_NAMES
   test_distribution
+  test_depletion_scheme
   test_file_utils
   test_sparse_matrix
   test_tally
