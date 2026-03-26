@@ -101,6 +101,17 @@ public:
   //! The sparsity patterns may differ; the result has the union of both.
   CSCMatrix operator+(const CSCMatrix& other) const;
 
+  //! In-place element-wise addition. Same semantics as operator+ but
+  //! avoids allocating a new matrix when the sparsity pattern is a
+  //! superset of \p other's pattern. Falls back to operator+ otherwise.
+  CSCMatrix& operator+=(const CSCMatrix& other);
+
+  //! Scalar multiplication (returns a new matrix).
+  friend CSCMatrix operator*(double scalar, const CSCMatrix& mat);
+
+  //! Scale all values in-place by \p scalar.
+  void scale(double scalar);
+
 private:
   CSCPattern pattern_;  //!< Structural pattern
   vector<double> data_; //!< Values [nnz]

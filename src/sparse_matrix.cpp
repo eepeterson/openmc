@@ -287,4 +287,48 @@ CSCMatrix CSCMatrix::operator+(const CSCMatrix& other) const
   return CSCMatrix(std::move(pattern), std::move(new_data));
 }
 
+CSCMatrix& CSCMatrix::operator+=(const CSCMatrix& other)
+{
+  int n = pattern_.n();
+  if (other.n() != n) {
+    fatal_error(fmt::format(
+      "Cannot add CSC matrices with different dimensions ({} vs {})", n,
+      other.n()));
+  }
+
+  // Fast path: if this matrix's pattern is a superset of the other's,
+  // we can add values in-place without reallocating.
+  if (pattern_ == other.pattern()) {
+    for (int k = 0; k < nnz(); ++k) {
+      data_[k] += other.data_[k];
+    }
+    return *this;
+  }
+
+  // General path: fall back to operator+
+  *this = *this + other;
+  return *this;
+}
+
+CSCMatrix operator*(double scalar, const CSCMatrix& mat)
+{
+  vector<double> new_data(mat.data_.size());
+  for (size_t k = 0; k < mat.data_.size(); ++k) {
+    new_data[k] = scalar * mat.data_[k];
+  }
+  // Copy the pattern (shares indptr/indices structure)
+  CSCPattern new_pattern(
+    mat.pattern_.n(),
+    vector<int>(mat.pattern_.indptr()),
+    vector<int>(mat.pattern_.indices()));
+  return CSCMatrix(std::move(new_pattern), std::move(new_data));
+}
+
+void CSCMatrix::scale(double scalar)
+{
+  for (size_t k = 0; k < data_.size(); ++k) {
+    data_[k] *= scalar;
+  }
+}
+
 } // namespace openmc
