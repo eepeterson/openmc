@@ -167,13 +167,17 @@ static vector<double> get_tally_means(int32_t tally_idx)
   auto& tally = *model::tallies[tally_idx];
   int n_real = tally.n_realizations_;
   const auto& res = tally.results();
-  // results shape: [n_bins, 3] where column 1 is the sum
-  // n_bins = n_filter_bins * n_nuclides * n_scores
-  int n_bins = res.shape()[0];
+  // results shape: [n_filter_bins, n_nuclides * n_scores, 3]
+  // where the last axis is (VALUE, SUM, SUM_SQ)
+  int n_filter_bins = res.shape()[0];
+  int n_nuc_scores = res.shape()[1];
+  int n_bins = n_filter_bins * n_nuc_scores;
   vector<double> means(n_bins);
   if (n_real > 0) {
-    for (int i = 0; i < n_bins; ++i) {
-      means[i] = res(i, 1) / n_real;
+    for (int fb = 0; fb < n_filter_bins; ++fb) {
+      for (int ns = 0; ns < n_nuc_scores; ++ns) {
+        means[fb * n_nuc_scores + ns] = res(fb, ns, 1) / n_real;
+      }
     }
   }
   return means;
@@ -317,6 +321,9 @@ static void handle_expm(
   }
 
   // CRAM solve per material
+  if (!input_dens) {
+    fatal_error("Depletion Expm step: density source not found in store.");
+  }
   out_densities.resize(n_mats);
   for (int m = 0; m < n_mats; ++m) {
     out_densities[m] =

@@ -53,6 +53,7 @@ void free_memory()
   free_memory_bank();
   free_memory_plot();
   free_memory_weight_windows();
+  openmc_depletion_free();
   data::depletion_chain.reset();
   data::chain_nuclide_map.clear();
   if (mpi::master) {

@@ -312,16 +312,9 @@ CSCMatrix& CSCMatrix::operator+=(const CSCMatrix& other)
 
 CSCMatrix operator*(double scalar, const CSCMatrix& mat)
 {
-  vector<double> new_data(mat.data_.size());
-  for (size_t k = 0; k < mat.data_.size(); ++k) {
-    new_data[k] = scalar * mat.data_[k];
-  }
-  // Copy the pattern (shares indptr/indices structure)
-  CSCPattern new_pattern(
-    mat.pattern_.n(),
-    vector<int>(mat.pattern_.indptr()),
-    vector<int>(mat.pattern_.indices()));
-  return CSCMatrix(std::move(new_pattern), std::move(new_data));
+  CSCMatrix result(mat);
+  result.scale(scalar);
+  return result;
 }
 
 void CSCMatrix::scale(double scalar)
