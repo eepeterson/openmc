@@ -423,6 +423,45 @@ int openmc_update_depletable_materials(
   int* nonzero_nuc_indices,
   int* n_nonzero_out);
 
+// Configure the depletion kernel's persistent state.
+// Must be called after openmc_init() and openmc_load_depletion_chain().
+int openmc_depletion_set_config(
+  int n_materials,
+  const int32_t* material_indices,
+  const double* volumes,
+  const int* transportable,
+  int32_t rate_tally_idx,
+  int32_t heating_tally_idx,
+  int n_reactions,
+  int fission_rx_idx,
+  const double* fission_q,
+  int norm_mode,
+  int source_rate_type,
+  int solver_order);
+
+// Execute one macro-timestep of a depletion integration scheme.
+// Two-call pattern: first call with out_eos=NULL queries BOS matrix sizes.
+int openmc_depletion_execute_step(
+  const char* scheme_name,
+  const double* n_bos_flat,
+  double dt,
+  double source_rate,
+  const int* prev_indptr,
+  const int* prev_indices,
+  const double* prev_data,
+  const int* prev_nnz_per_mat,
+  double prev_dt,
+  int run_transport,
+  double* out_eos_flat,
+  int* out_bos_indptr,
+  int* out_bos_indices,
+  double* out_bos_data,
+  int* out_bos_nnz_per_mat,
+  double* out_k_eff);
+
+// Free the depletion kernel state.
+int openmc_depletion_free();
+
 // Error codes
 extern int OPENMC_E_UNASSIGNED;
 extern int OPENMC_E_ALLOCATE;

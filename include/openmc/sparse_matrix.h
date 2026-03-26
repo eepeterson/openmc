@@ -76,6 +76,11 @@ public:
     : pattern_(std::move(pattern)), data_(std::move(data))
   {}
 
+  //! Construct an empty (zero) n x n matrix.
+  explicit CSCMatrix(int n)
+    : pattern_(n, vector<int>(n + 1, 0), {}), data_()
+  {}
+
   //! Construct from coordinate (COO) triplets.
   //! Duplicate (row, col) pairs are summed.
   //! \param n Matrix dimension (square n x n)

@@ -5,6 +5,10 @@
 #ifndef OPENMC_DEPLETION_H
 #define OPENMC_DEPLETION_H
 
+#include <cstdint>
+
+#include "openmc/bateman_solvers.h"
+#include "openmc/depletion_scheme.h"
 #include "openmc/sparse_matrix.h"
 #include "openmc/vector.h"
 
@@ -91,6 +95,75 @@ int update_depletable_materials(
   const double* volumes,
   const int* transportable,
   int* nonzero_nuc_indices);
+
+//==============================================================================
+//! Persistent depletion configuration for the macro-timestep kernel.
+//==============================================================================
+
+struct DepletionState {
+  // --- Material configuration ---
+  int n_materials {0};
+  vector<int32_t> material_indices; //!< C-API indices into model::materials
+  vector<double> volumes;           //!< Material volumes [cm^3]
+  vector<int> transportable;        //!< Per-chain-nuclide mask (0/1)
+
+  // --- Tally configuration ---
+  int32_t rate_tally_idx {-1};    //!< Index of rate tally in model::tallies
+  int32_t heating_tally_idx {-1}; //!< Index of heating tally, or -1
+
+  // --- Chain/reaction configuration ---
+  int n_reactions {0};            //!< Number of reaction scores
+  int fission_rx_idx {-1};       //!< Index of "fission" in reaction list
+  vector<double> fission_q;      //!< Fission Q per chain nuclide [eV]
+  NormalizationMode norm_mode {NormalizationMode::fission_q};
+  SourceRateType source_rate_type {SourceRateType::power};
+  int solver_order {48};          //!< CRAM order (16 or 48)
+
+  // --- Tally nuclide tracking (updated each transport) ---
+  vector<int> nuc_chain_indices;  //!< Chain indices of tallied nuclides
+  int n_tallied_nucs {0};
+
+  // --- Solver instance ---
+  IPFCramSolver cram_solver {IPFCramSolver::Order::cram48};
+};
+
+//! Result of executing one macro-timestep.
+struct SchemeStepResult {
+  //! EOS atom counts per material, each length n_chain
+  vector<vector<double>> eos_densities;
+  //! BOS combined matrices (for PREV_STEP on next step)
+  vector<CSCMatrix> bos_matrices;
+  //! k-effective from last transport in this step
+  double k_eff {1.0};
+};
+
+//! Execute one macro-timestep of a depletion integration scheme.
+//!
+//! Interprets the scheme DAG, running transport (update materials →
+//! openmc_reset → openmc_run → extract rates) for Transport nodes
+//! and CRAM solves for Expm nodes.
+//!
+//! \param scheme         Integration scheme to execute.
+//! \param state          Depletion configuration (modified: nuc_chain_indices
+//!                       updated per transport).
+//! \param n_bos          BOS atom counts per material [n_materials][n_chain].
+//! \param dt             Timestep in seconds.
+//! \param source_rate    Power [W] or source rate [n/s].
+//! \param prev_step_matrices  BOS matrices from previous macro-step for
+//!                            LE/QI PREV_STEP reference. nullptr if none.
+//! \param prev_dt        Previous timestep in seconds (for LE/QI weights).
+//! \param run_transport  If false, reuse cached results for all Transport
+//!                       nodes (transport_schedule support).
+//! \return SchemeStepResult with EOS densities, BOS matrices, and k_eff.
+SchemeStepResult execute_scheme_step(
+  const IntegrationScheme& scheme,
+  DepletionState& state,
+  const vector<vector<double>>& n_bos,
+  double dt,
+  double source_rate,
+  const vector<CSCMatrix>* prev_step_matrices,
+  double prev_dt,
+  bool run_transport);
 
 } // namespace openmc
 
