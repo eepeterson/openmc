@@ -413,6 +413,16 @@ int openmc_compute_depletion_rates(
   double* out_normalization_factor,
   double* out_fission_energy);
 
+int openmc_update_depletable_materials(
+  int n_materials,
+  const int32_t* material_indices,
+  int n_chain,
+  const double* atom_counts,
+  const double* volumes,
+  const int* transportable,
+  int* nonzero_nuc_indices,
+  int* n_nonzero_out);
+
 // Error codes
 extern int OPENMC_E_UNASSIGNED;
 extern int OPENMC_E_ALLOCATE;

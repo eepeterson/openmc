@@ -3,12 +3,13 @@
 
 #include "openmc/depletion.h"
 
-#include <algorithm> // for copy
+#include <algorithm> // for copy, sort
 #include <cstring>   // for memcpy
 
 #include "openmc/capi.h"
 #include "openmc/chain.h"
 #include "openmc/error.h"
+#include "openmc/material.h"
 #include "openmc/sparse_matrix.h"
 
 namespace openmc {
@@ -104,6 +105,54 @@ DepletionRates compute_depletion_rates(
   return result;
 }
 
+int update_depletable_materials(
+  int n_materials,
+  const int32_t* material_indices,
+  int n_chain,
+  const double* atom_counts,
+  const double* volumes,
+  const int* transportable,
+  int* nonzero_nuc_indices)
+{
+  auto& chain = *data::depletion_chain;
+
+  // Track which chain indices have nonzero density in any material
+  vector<bool> has_nonzero(n_chain, false);
+
+  for (int m = 0; m < n_materials; ++m) {
+    const double* n_atoms = atom_counts + m * n_chain;
+    double vol = volumes[m];
+
+    vector<std::string> nuclides;
+    vector<double> densities;
+
+    for (int j = 0; j < n_chain; ++j) {
+      if (!transportable[j])
+        continue;
+      double dens = n_atoms[j] / vol * 1.0e-24; // atom/b-cm
+      if (dens > 0.0) {
+        nuclides.push_back(chain.nuclide(j).name());
+        densities.push_back(dens);
+        has_nonzero[j] = true;
+      }
+    }
+
+    if (!nuclides.empty()) {
+      int32_t idx = material_indices[m];
+      model::materials[idx]->set_densities(nuclides, densities);
+    }
+  }
+
+  // Collect sorted nonzero chain indices
+  int count = 0;
+  for (int j = 0; j < n_chain; ++j) {
+    if (has_nonzero[j]) {
+      nonzero_nuc_indices[count++] = j;
+    }
+  }
+  return count;
+}
+
 } // namespace openmc
 
 //==============================================================================
@@ -180,6 +229,35 @@ extern "C" int openmc_compute_depletion_rates(
       data_offset += mat_nnz;
     }
 
+    return 0;
+  } catch (const std::exception& e) {
+    set_errmsg(e.what());
+    return OPENMC_E_UNASSIGNED;
+  }
+}
+
+extern "C" int openmc_update_depletable_materials(
+  int n_materials,
+  const int32_t* material_indices,
+  int n_chain,
+  const double* atom_counts,
+  const double* volumes,
+  const int* transportable,
+  int* nonzero_nuc_indices,
+  int* n_nonzero_out)
+{
+  using namespace openmc;
+  try {
+    if (!data::depletion_chain) {
+      set_errmsg("Depletion chain not loaded.");
+      return OPENMC_E_UNASSIGNED;
+    }
+
+    int count = update_depletable_materials(
+      n_materials, material_indices, n_chain, atom_counts,
+      volumes, transportable, nonzero_nuc_indices);
+
+    *n_nonzero_out = count;
     return 0;
   } catch (const std::exception& e) {
     set_errmsg(e.what());

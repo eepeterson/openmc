@@ -527,3 +527,55 @@ def compute_depletion_rates(tally_means, n_materials, n_tallied_nucs,
         data_offset += mat_nnz
 
     return matrices, out_norm.value, out_fe.value
+
+
+# --- Update depletable materials API ---
+
+_dll.openmc_update_depletable_materials.restype = c_int
+_dll.openmc_update_depletable_materials.errcheck = _error_handler
+_dll.openmc_update_depletable_materials.argtypes = [
+    c_int,                                          # n_materials
+    ndpointer(dtype=np.int32, ndim=1, flags='C'),   # material_indices
+    c_int,                                          # n_chain
+    _array_1d_dbl,                                  # atom_counts
+    _array_1d_dbl,                                  # volumes
+    _array_1d_int,                                  # transportable
+    ndpointer(dtype=np.int32, ndim=1, flags='C'),   # nonzero_nuc_indices
+    POINTER(c_int),                                 # n_nonzero_out
+]
+
+
+def update_depletable_materials(material_indices, atom_counts, volumes,
+                                transportable):
+    """Update depletable material compositions via C++ and return nonzero
+    nuclide chain indices.
+
+    Parameters
+    ----------
+    material_indices : numpy.ndarray of int32
+        C-API index for each burnable material.
+    atom_counts : numpy.ndarray
+        Atom counts, shape (n_materials, n_chain), row-major.
+    volumes : numpy.ndarray
+        Volume of each material [cm^3], length n_materials.
+    transportable : numpy.ndarray of int32
+        Mask (0/1) per chain nuclide indicating cross-section data.
+
+    Returns
+    -------
+    numpy.ndarray of int32
+        Sorted chain indices of nuclides with nonzero density.
+    """
+    n_materials, n_chain = atom_counts.shape
+    mat_idx = np.ascontiguousarray(material_indices, dtype=np.int32)
+    atoms_flat = np.ascontiguousarray(atom_counts.ravel(), dtype=np.float64)
+    vols = np.ascontiguousarray(volumes, dtype=np.float64)
+    trans = np.ascontiguousarray(transportable, dtype=np.int32)
+    out_indices = np.empty(n_chain, dtype=np.int32)
+    n_nonzero = c_int(0)
+
+    _dll.openmc_update_depletable_materials(
+        n_materials, mat_idx, n_chain, atoms_flat, vols, trans,
+        out_indices, byref(n_nonzero))
+
+    return out_indices[:n_nonzero.value].copy()

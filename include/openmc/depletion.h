@@ -64,6 +64,34 @@ DepletionRates compute_depletion_rates(
   const double* heating_means,
   int fission_rx_idx);
 
+//! Update depletable material compositions and return the set of nuclides
+//! that have nonzero density in at least one material.
+//!
+//! For each material, converts atom counts to atom/b-cm, filters nuclides
+//! to those flagged as transportable and with positive density, then calls
+//! Material::set_densities().
+//!
+//! \param n_materials    Number of burnable materials.
+//! \param material_indices  C-API index into model::materials for each
+//!                          burnable material. Size n_materials.
+//! \param n_chain        Total number of nuclides in the depletion chain.
+//! \param atom_counts    Atom counts per material, packed row-major
+//!                       [n_materials * n_chain].
+//! \param volumes        Volume of each material [cm^3], size n_materials.
+//! \param transportable  Bit mask (0/1) per chain nuclide indicating whether
+//!                       it has transport cross-section data. Size n_chain.
+//! \param[out] nonzero_nuc_indices  Chain indices of nuclides with nonzero
+//!             density in at least one material.  Caller allocates [n_chain].
+//! \return  Number of nonzero nuclide indices written to nonzero_nuc_indices.
+int update_depletable_materials(
+  int n_materials,
+  const int32_t* material_indices,
+  int n_chain,
+  const double* atom_counts,
+  const double* volumes,
+  const int* transportable,
+  int* nonzero_nuc_indices);
+
 } // namespace openmc
 
 #endif // OPENMC_DEPLETION_H
