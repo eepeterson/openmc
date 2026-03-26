@@ -294,19 +294,18 @@ class DepletionDriver:
         # updating material compositions for transport)
         self._transportable = nucs_with_data & set(self._nuclide_names)
 
-        # Set up the reaction-rate tally
+        # Set up the reaction-rate tally.  Include ALL transportable chain
+        # nuclides (not just those currently in materials) so that fission
+        # products produced during depletion are tallied once they appear
+        # with nonzero density.
         mat_filter = openmc.lib.MaterialFilter(
             [openmc.lib.materials[int(m)] for m in self._burn_mat_ids])
         nuc_names = []
         nuc_chain_indices = []
-        for mat_id in self._burn_mat_ids:
-            lib_mat = openmc.lib.materials[int(mat_id)]
-            for name in lib_mat.nuclides:
-                if name in self._chain.nuclide_dict:
-                    if name not in nuc_names:
-                        nuc_names.append(name)
-                        nuc_chain_indices.append(
-                            self._chain.nuclide_dict[name])
+        for name in self._nuclide_names:
+            if name in self._transportable:
+                nuc_names.append(name)
+                nuc_chain_indices.append(self._chain.nuclide_dict[name])
 
         self._tally_nuclides = nuc_names
         self._tally_nuc_chain_idx = np.array(nuc_chain_indices, dtype=np.int32)
@@ -359,6 +358,8 @@ class DepletionDriver:
 
         """
         # Update material compositions (only nuclides with cross-section data)
+        # and track which nuclides have nonzero density across all materials.
+        nonzero_nucs = set()
         for i, mat_id in enumerate(self._burn_mat_ids):
             vol = self._volumes[mat_id]
             n_atoms = densities_per_mat[i]  # shape (n_chain,)
@@ -371,9 +372,19 @@ class DepletionDriver:
                 if dens > 0.0:
                     nuclides.append(name)
                     atom_densities.append(dens)
+                    nonzero_nucs.add(name)
             if nuclides:
                 lib_mat = openmc.lib.materials[int(mat_id)]
                 lib_mat.set_densities(nuclides, atom_densities)
+
+        # Update tally nuclide list to only include nuclides with nonzero
+        # density (avoids scoring 1000+ zero-density nuclides).
+        nuc_names = [n for n in self._nuclide_names if n in nonzero_nucs]
+        nuc_chain_idx = np.array(
+            [self._chain.nuclide_dict[n] for n in nuc_names], dtype=np.int32)
+        self._tally_nuclides = nuc_names
+        self._tally_nuc_chain_idx = nuc_chain_idx
+        self._rate_tally.nuclides = nuc_names
 
         # Run transport
         openmc.lib.reset()
