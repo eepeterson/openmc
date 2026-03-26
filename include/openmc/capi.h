@@ -382,6 +382,37 @@ int openmc_chain_form_rxn_matrix(
   int* out_indptr, int* out_indices, double* out_data,
   int* out_nnz, int* out_n);
 
+// Compute combined depletion matrices (A_decay + s * A_rxn) for each material
+// from tally results.
+// norm_mode: 0 = fission_q, 1 = energy_deposition
+// source_rate_type: 0 = power, 1 = power_density, 2 = source
+// Returns per-material CSC matrices packed contiguously:
+//   out_indptr  [sum(n_chain+1)]
+//   out_indices [sum(nnz_per_mat)]
+//   out_data    [sum(nnz_per_mat)]
+// First call with out_indices=NULL to query nnz_per_mat and n_chain.
+int openmc_compute_depletion_rates(
+  const double* tally_means,
+  int n_materials,
+  int n_tallied_nucs,
+  int n_reactions,
+  const int* nuc_chain_indices,
+  const double* atom_counts,
+  const double* volumes,
+  double source_rate,
+  int source_rate_type,
+  int norm_mode,
+  const double* fission_q,
+  const double* heating_means,
+  int fission_rx_idx,
+  int* out_indptr,
+  int* out_indices,
+  double* out_data,
+  int* out_nnz_per_mat,
+  int* out_n_chain,
+  double* out_normalization_factor,
+  double* out_fission_energy);
+
 // Error codes
 extern int OPENMC_E_UNASSIGNED;
 extern int OPENMC_E_ALLOCATE;

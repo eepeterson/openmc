@@ -385,3 +385,145 @@ def chain_form_rxn_matrix(rates, nuc_to_chain_idx, n_reactions,
         byref(out_nnz), byref(out_n))
 
     return csc_array((out_data, out_indices, out_indptr), shape=(n, n))
+
+
+# --- Compute depletion rates (rate extraction + normalization + combine) ---
+
+_dll.openmc_compute_depletion_rates.restype = c_int
+_dll.openmc_compute_depletion_rates.errcheck = _error_handler
+_dll.openmc_compute_depletion_rates.argtypes = [
+    _array_1d_dbl,  # tally_means
+    c_int,          # n_materials
+    c_int,          # n_tallied_nucs
+    c_int,          # n_reactions
+    _array_1d_int,  # nuc_chain_indices
+    _array_1d_dbl,  # atom_counts
+    _array_1d_dbl,  # volumes
+    c_double,       # source_rate
+    c_int,          # source_rate_type
+    c_int,          # norm_mode
+    _array_1d_dbl,  # fission_q
+    c_void_p,       # heating_means (nullable)
+    c_int,          # fission_rx_idx
+    c_void_p,       # out_indptr (nullable for query)
+    c_void_p,       # out_indices (nullable for query)
+    c_void_p,       # out_data (nullable for query)
+    _array_1d_int,  # out_nnz_per_mat
+    POINTER(c_int), # out_n_chain
+    POINTER(c_double),  # out_normalization_factor
+    POINTER(c_double),  # out_fission_energy
+]
+
+# Source rate type constants (must match C++ enum)
+SOURCE_RATE_TYPE_POWER = 0
+SOURCE_RATE_TYPE_POWER_DENSITY = 1
+SOURCE_RATE_TYPE_SOURCE = 2
+
+# Normalization mode constants (must match C++ enum)
+NORM_MODE_FISSION_Q = 0
+NORM_MODE_ENERGY_DEPOSITION = 1
+
+
+def compute_depletion_rates(tally_means, n_materials, n_tallied_nucs,
+                            n_reactions, nuc_chain_indices,
+                            atom_counts, volumes, source_rate,
+                            source_rate_type, norm_mode,
+                            fission_q, fission_rx_idx,
+                            heating_means=None):
+    """Compute combined depletion matrices from tally data via C++.
+
+    Extracts reaction-rate matrices from transport tally results, computes
+    the source normalization factor, and returns combined matrices
+    ``A_decay + s * A_rxn`` for each material.
+
+    Parameters
+    ----------
+    tally_means : numpy.ndarray
+        Flat tally output, shape ``(n_materials * n_tallied_nucs * n_reactions,)``.
+    n_materials : int
+    n_tallied_nucs : int
+    n_reactions : int
+    nuc_chain_indices : numpy.ndarray
+        Chain index for each tallied nuclide, shape ``(n_tallied_nucs,)``.
+    atom_counts : numpy.ndarray
+        Atom counts, shape ``(n_materials * n_chain,)``.
+    volumes : numpy.ndarray
+        Volumes in cm^3, shape ``(n_materials,)``.
+    source_rate : float
+    source_rate_type : int
+        0=power, 1=power_density, 2=source.
+    norm_mode : int
+        0=fission_q, 1=energy_deposition.
+    fission_q : numpy.ndarray
+        Fission Q per chain nuclide [eV], shape ``(n_chain,)``.
+    fission_rx_idx : int
+        Index of fission in reaction list, or -1.
+    heating_means : numpy.ndarray, optional
+        Per-material heating [eV/src], shape ``(n_materials,)``.
+
+    Returns
+    -------
+    combined_matrices : list of csc_array
+        Combined depletion matrices per material.
+    normalization_factor : float
+    fission_energy : float
+
+    """
+    tally_flat = np.ascontiguousarray(tally_means.ravel(), dtype=np.float64)
+    nuc_idx = np.ascontiguousarray(nuc_chain_indices, dtype=np.int32)
+    atoms_flat = np.ascontiguousarray(atom_counts.ravel(), dtype=np.float64)
+    vols = np.ascontiguousarray(volumes, dtype=np.float64)
+    fq = np.ascontiguousarray(fission_q, dtype=np.float64)
+
+    out_nnz_per_mat = np.empty(n_materials, dtype=np.int32)
+    out_n_chain = c_int(0)
+    out_norm = c_double(0.0)
+    out_fe = c_double(0.0)
+
+    heating_ptr = None
+    if heating_means is not None:
+        h = np.ascontiguousarray(heating_means, dtype=np.float64)
+        heating_ptr = h.ctypes.data
+
+    # Query call to get nnz per material
+    _dll.openmc_compute_depletion_rates(
+        tally_flat, n_materials, n_tallied_nucs, n_reactions,
+        nuc_idx, atoms_flat, vols, source_rate,
+        source_rate_type, norm_mode, fq, heating_ptr,
+        fission_rx_idx,
+        None, None, None,
+        out_nnz_per_mat, byref(out_n_chain),
+        byref(out_norm), byref(out_fe))
+
+    n_chain = out_n_chain.value
+    total_nnz = int(out_nnz_per_mat.sum())
+
+    # Allocate and fill
+    out_indptr = np.empty(n_materials * (n_chain + 1), dtype=np.int32)
+    out_indices = np.empty(total_nnz, dtype=np.int32)
+    out_data = np.empty(total_nnz, dtype=np.float64)
+
+    _dll.openmc_compute_depletion_rates(
+        tally_flat, n_materials, n_tallied_nucs, n_reactions,
+        nuc_idx, atoms_flat, vols, source_rate,
+        source_rate_type, norm_mode, fq, heating_ptr,
+        fission_rx_idx,
+        out_indptr.ctypes.data, out_indices.ctypes.data,
+        out_data.ctypes.data,
+        out_nnz_per_mat, byref(out_n_chain),
+        byref(out_norm), byref(out_fe))
+
+    # Unpack per-material CSC matrices
+    matrices = []
+    indptr_offset = 0
+    data_offset = 0
+    for m in range(n_materials):
+        mat_nnz = int(out_nnz_per_mat[m])
+        ip = out_indptr[indptr_offset:indptr_offset + n_chain + 1]
+        idx = out_indices[data_offset:data_offset + mat_nnz]
+        dat = out_data[data_offset:data_offset + mat_nnz]
+        matrices.append(csc_array((dat, idx, ip), shape=(n_chain, n_chain)))
+        indptr_offset += n_chain + 1
+        data_offset += mat_nnz
+
+    return matrices, out_norm.value, out_fe.value

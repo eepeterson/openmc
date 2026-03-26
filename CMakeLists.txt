@@ -365,6 +365,7 @@ list(APPEND libopenmc_SOURCES
   src/collision_track.cpp
   src/cross_sections.cpp
   src/dagmc.cpp
+  src/depletion.cpp
   src/distribution.cpp
   src/distribution_angle.cpp
   src/distribution_energy.cpp
