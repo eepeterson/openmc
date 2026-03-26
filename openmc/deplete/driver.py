@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.sparse import csc_array
 
+from openmc.data import DataLibrary
+
 import openmc
 import openmc.checkvalue as cv
 import openmc.lib
@@ -55,6 +57,18 @@ _TIMESTEP_UNITS = {
     'a': 86400.0 * 365.25,
     'MWd/kg': None,  # handled separately (burnup)
 }
+
+
+def _get_nuclides_with_data():
+    """Return set of nuclide names that have neutron cross-section data."""
+    cross_sections = openmc.config.get("cross_sections")
+    if cross_sections is None:
+        return set()
+    nuclides = set()
+    for lib in DataLibrary.from_xml(cross_sections).libraries:
+        if lib['type'] == 'neutron':
+            nuclides.update(lib['materials'])
+    return nuclides
 
 
 class DepletionDriver:
@@ -162,7 +176,9 @@ class DepletionDriver:
         # Python chain (for metadata, decay matrix, nuclide info)
         self._chain = Chain.from_xml(self._chain_file)
 
-        # Load the chain into C++ once
+        # Load the chain into C++ once — must be called again in
+        # _initialize() after openmc.lib.init() since finalize() clears it.
+        # We still load here to validate the file path.
         load_depletion_chain(str(self._chain_file))
 
         # Precompute the decay matrix (constant for all steps)
@@ -207,10 +223,22 @@ class DepletionDriver:
 
     def _initialize(self):
         """Set up C API, tallies, and material metadata."""
-        self._model.export_to_xml()
+
+        # Determine which nuclides have cross-section data so we can
+        # strip decay-only nuclides from materials before transport.
+        nucs_with_data = _get_nuclides_with_data()
+        chain_nucs = set(self._nuclide_names)
+        decay_only = chain_nucs - nucs_with_data
+
+        self._model.export_to_xml(
+            nuclides_to_ignore=decay_only)
 
         # Initialize the C library
         openmc.lib.init()
+
+        # Re-load the depletion chain into C++ (openmc.lib.finalize()
+        # clears the global chain, so we must reload after each init).
+        load_depletion_chain(str(self._chain_file))
 
         # Identify depletable materials
         self._burn_mat_ids = []
@@ -262,6 +290,10 @@ class DepletionDriver:
         # Build reaction score list from chain
         self._reactions = list(self._chain.reactions)
 
+        # Record which chain nuclides have cross-section data (used when
+        # updating material compositions for transport)
+        self._transportable = nucs_with_data & set(self._nuclide_names)
+
         # Set up the reaction-rate tally
         mat_filter = openmc.lib.MaterialFilter(
             [openmc.lib.materials[int(m)] for m in self._burn_mat_ids])
@@ -295,15 +327,6 @@ class DepletionDriver:
         else:
             self._heating_tally = None
 
-        # Build per-material nuclide index mapping
-        self._mat_nuc_info = {}
-        for mat_id in self._burn_mat_ids:
-            lib_mat = openmc.lib.materials[int(mat_id)]
-            self._mat_nuc_info[mat_id] = (
-                list(lib_mat.nuclides),
-                np.array(lib_mat.densities),
-            )
-
         # Cached transport results
         self._cached_rxn_matrices = None
         self._cached_k_eff = None
@@ -335,13 +358,15 @@ class DepletionDriver:
             materials.
 
         """
-        # Update material compositions
+        # Update material compositions (only nuclides with cross-section data)
         for i, mat_id in enumerate(self._burn_mat_ids):
             vol = self._volumes[mat_id]
             n_atoms = densities_per_mat[i]  # shape (n_chain,)
             nuclides = []
             atom_densities = []
             for j, name in enumerate(self._nuclide_names):
+                if name not in self._transportable:
+                    continue
                 dens = n_atoms[j] / vol * 1e-24  # atom/b-cm
                 if dens > 0.0:
                     nuclides.append(name)
@@ -660,6 +685,10 @@ class DepletionDriver:
     def _get_initial_compositions(self):
         """Extract initial atom counts from the model's materials.
 
+        Uses the *Python* model materials (which include decay-only
+        nuclides) rather than the C library materials (which exclude
+        nuclides without cross-section data).
+
         Returns
         -------
         list of numpy.ndarray
@@ -668,14 +697,15 @@ class DepletionDriver:
         """
         nuclide_dict = self._chain.nuclide_dict
         n_chain = self._n_chain
+        # Build lookup from material ID to Python Material
+        py_mats = {str(m.id): m for m in self._model.materials}
         result = []
         for mat_id in self._burn_mat_ids:
-            lib_mat = openmc.lib.materials[int(mat_id)]
-            n = np.zeros(n_chain)
+            py_mat = py_mats[mat_id]
             vol = self._volumes[mat_id]
-            names = lib_mat.nuclides
-            densities = lib_mat.densities
-            for name, dens in zip(names, densities):
+            n = np.zeros(n_chain)
+            atom_densities = py_mat.get_nuclide_atom_densities()
+            for name, dens in atom_densities.items():
                 if name in nuclide_dict:
                     # dens in atom/b-cm; convert to atoms
                     n[nuclide_dict[name]] = dens * vol * 1e24
