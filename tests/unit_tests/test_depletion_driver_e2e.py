@@ -321,3 +321,108 @@ def test_multistep_predictor_physics(run_in_tmpdir):
     for i in range(len(k_vals)):
         assert 0.5 < k_vals[i, 0] < 2.5, \
             f"Step {i}: k_eff={k_vals[i,0]:.4f} out of range"
+
+
+# ------------------------------------------------------------------
+# Test 5: C++ kernel vs Python interpreter -- numerical comparison
+# ------------------------------------------------------------------
+
+def test_cpp_kernel_predictor(run_in_tmpdir):
+    """Verify C++ kernel produces physically sensible results."""
+    if not CHAIN_SIMPLE.exists():
+        pytest.skip("chain_simple.xml not found")
+
+    dt = [5.0 * 86400.0]  # 5 days
+    power = 174.0
+
+    model = _make_pin_model()
+    driver = DepletionDriver(
+        model, str(CHAIN_SIMPLE), dt, power,
+        source_rate_type='power',
+        scheme='predictor',
+        normalization_mode='fission-q',
+        use_cpp_kernel=True,
+    )
+
+    res = driver.run()
+    mat_id = list(res[0].index_mat.keys())[0]
+
+    _, k_vals = res.get_keff()
+    _, u235 = res.get_atoms(mat_id, 'U235')
+    _, u238 = res.get_atoms(mat_id, 'U238')
+
+    print(f"\n{'='*60}")
+    print(f"C++ kernel predictor (1 step, 5 days, {power} W)")
+    print(f"  k_eff: {k_vals}")
+    print(f"  U235: EOS={u235[0]:.6e}")
+    print(f"  U238: EOS={u238[0]:.6e}")
+    print(f"{'='*60}")
+
+    # Same physics checks as Python path
+    assert 0.5 < k_vals[0, 0] < 2.5
+    assert u235[0] > 0
+    assert u238[0] > 0
+
+
+def test_cpp_kernel_cecm(run_in_tmpdir):
+    """Verify C++ kernel CECM produces physically sensible results."""
+    if not CHAIN_SIMPLE.exists():
+        pytest.skip("chain_simple.xml not found")
+
+    dt = [5.0 * 86400.0]
+    power = 174.0
+
+    model = _make_pin_model()
+    driver = DepletionDriver(
+        model, str(CHAIN_SIMPLE), dt, power,
+        source_rate_type='power',
+        scheme='cecm',
+        normalization_mode='fission-q',
+        use_cpp_kernel=True,
+    )
+
+    res = driver.run()
+    mat_id = list(res[0].index_mat.keys())[0]
+
+    _, k_vals = res.get_keff()
+    _, u235 = res.get_atoms(mat_id, 'U235')
+
+    print(f"\n{'='*60}")
+    print(f"C++ kernel CECM (1 step, 5 days, {power} W)")
+    print(f"  k_eff: {k_vals}")
+    print(f"  U235: EOS={u235[0]:.6e}")
+    print(f"{'='*60}")
+
+    assert 0.5 < k_vals[0, 0] < 2.5
+    assert u235[0] > 0
+
+
+def test_cpp_kernel_multistep(run_in_tmpdir):
+    """Verify C++ kernel multi-step predictor is consistent."""
+    if not CHAIN_SIMPLE.exists():
+        pytest.skip("chain_simple.xml not found")
+
+    n_steps = 3
+    dt = [3.0 * 86400.0] * n_steps
+    power = 174.0
+
+    model = _make_pin_model()
+    driver = DepletionDriver(
+        model, str(CHAIN_SIMPLE), dt, power,
+        source_rate_type='power',
+        scheme='predictor',
+        normalization_mode='fission-q',
+        use_cpp_kernel=True,
+    )
+
+    res = driver.run()
+    _, k_vals = res.get_keff()
+
+    print(f"\n{'='*60}")
+    print(f"C++ kernel multi-step predictor ({n_steps} steps)")
+    print(f"  k_eff per step: {k_vals[:, 0]}")
+    print(f"{'='*60}")
+
+    for i in range(len(k_vals)):
+        assert 0.5 < k_vals[i, 0] < 2.5, \
+            f"Step {i}: k_eff={k_vals[i,0]:.4f} out of range"

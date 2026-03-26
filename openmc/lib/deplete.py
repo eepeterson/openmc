@@ -579,3 +579,135 @@ def update_depletable_materials(material_indices, atom_counts, volumes,
         out_indices, byref(n_nonzero))
 
     return out_indices[:n_nonzero.value].copy()
+
+
+# --- Depletion kernel: configure, execute, free ---
+
+_dll.openmc_depletion_set_config.restype = c_int
+_dll.openmc_depletion_set_config.errcheck = _error_handler
+_dll.openmc_depletion_set_config.argtypes = [
+    c_int,          # n_materials
+    _array_1d_int,  # material_indices
+    _array_1d_dbl,  # volumes
+    _array_1d_int,  # transportable
+    c_int,          # rate_tally_idx
+    c_int,          # heating_tally_idx
+    c_int,          # n_reactions
+    c_int,          # fission_rx_idx
+    _array_1d_dbl,  # fission_q
+    c_int,          # norm_mode
+    c_int,          # source_rate_type
+    c_int,          # solver_order
+]
+
+
+def depletion_set_config(material_indices, volumes, transportable,
+                         rate_tally_idx, heating_tally_idx,
+                         n_reactions, fission_rx_idx, fission_q,
+                         norm_mode, source_rate_type, solver_order):
+    """Configure the C++ depletion kernel's persistent state.
+
+    Must be called after ``openmc.lib.init()`` and
+    ``load_depletion_chain()``.
+
+    Parameters
+    ----------
+    material_indices : numpy.ndarray of int32
+        C-API indices of burnable materials.
+    volumes : numpy.ndarray
+        Volumes [cm^3] per burnable material.
+    transportable : numpy.ndarray of int32
+        Per-chain-nuclide mask (0/1) for cross-section availability.
+    rate_tally_idx : int
+        Index of the reaction-rate tally in ``model::tallies``.
+    heating_tally_idx : int
+        Index of heating tally, or -1 if not used.
+    n_reactions : int
+        Number of reaction scores in the rate tally.
+    fission_rx_idx : int
+        Index of 'fission' in reaction list, or -1.
+    fission_q : numpy.ndarray
+        Fission Q-value per chain nuclide [eV].
+    norm_mode : int
+        0 = fission_q, 1 = energy_deposition.
+    source_rate_type : int
+        0 = power, 1 = power_density, 2 = source.
+    solver_order : int
+        CRAM order (16 or 48).
+
+    """
+    n_materials = len(material_indices)
+    mat_idx = np.ascontiguousarray(material_indices, dtype=np.int32)
+    vols = np.ascontiguousarray(volumes, dtype=np.float64)
+    trans = np.ascontiguousarray(transportable, dtype=np.int32)
+    fq = np.ascontiguousarray(fission_q, dtype=np.float64)
+
+    _dll.openmc_depletion_set_config(
+        n_materials, mat_idx, vols, trans,
+        rate_tally_idx, heating_tally_idx,
+        n_reactions, fission_rx_idx, fq,
+        norm_mode, source_rate_type, solver_order)
+
+
+_dll.openmc_depletion_execute_step.restype = c_int
+_dll.openmc_depletion_execute_step.errcheck = _error_handler
+_dll.openmc_depletion_execute_step.argtypes = [
+    c_char_p,       # scheme_name
+    _array_1d_dbl,  # n_bos_flat
+    c_double,       # dt
+    c_double,       # source_rate
+    c_double,       # prev_dt
+    c_int,          # run_transport
+    _array_1d_dbl,  # out_eos_flat
+    POINTER(c_double),  # out_k_eff
+]
+
+
+def depletion_execute_step(scheme_name, n_bos_flat, dt, source_rate,
+                           prev_dt, run_transport):
+    """Execute one macro-timestep of a depletion scheme via C++.
+
+    Previous-step BOS matrices are managed internally by the C++ kernel.
+
+    Parameters
+    ----------
+    scheme_name : str
+        Integration scheme name (e.g. 'cecm', 'leqi').
+    n_bos_flat : numpy.ndarray
+        BOS atom counts, flat array of shape ``(n_materials * n_chain,)``.
+    dt : float
+        Timestep in seconds.
+    source_rate : float
+        Power [W] or source rate [n/s].
+    prev_dt : float
+        Previous timestep in seconds (0.0 for first step).
+    run_transport : bool
+        Whether to run transport or reuse cached results.
+
+    Returns
+    -------
+    eos_flat : numpy.ndarray
+        EOS atom counts, same shape as *n_bos_flat*.
+    k_eff : float
+        Effective multiplication factor from last transport.
+
+    """
+    bos = np.ascontiguousarray(n_bos_flat, dtype=np.float64)
+    eos = np.empty_like(bos)
+    k_eff = c_double(0.0)
+
+    _dll.openmc_depletion_execute_step(
+        scheme_name.encode(), bos, dt, source_rate,
+        prev_dt, int(run_transport), eos, byref(k_eff))
+
+    return eos, k_eff.value
+
+
+_dll.openmc_depletion_free.restype = c_int
+_dll.openmc_depletion_free.errcheck = _error_handler
+_dll.openmc_depletion_free.argtypes = []
+
+
+def depletion_free():
+    """Free the C++ depletion kernel state."""
+    _dll.openmc_depletion_free()

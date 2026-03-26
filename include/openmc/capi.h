@@ -440,23 +440,15 @@ int openmc_depletion_set_config(
   int solver_order);
 
 // Execute one macro-timestep of a depletion integration scheme.
-// Two-call pattern: first call with out_eos=NULL queries BOS matrix sizes.
+// Previous-step BOS matrices are managed internally in the depletion state.
 int openmc_depletion_execute_step(
   const char* scheme_name,
   const double* n_bos_flat,
   double dt,
   double source_rate,
-  const int* prev_indptr,
-  const int* prev_indices,
-  const double* prev_data,
-  const int* prev_nnz_per_mat,
   double prev_dt,
   int run_transport,
   double* out_eos_flat,
-  int* out_bos_indptr,
-  int* out_bos_indices,
-  double* out_bos_data,
-  int* out_bos_nnz_per_mat,
   double* out_k_eff);
 
 // Free the depletion kernel state.

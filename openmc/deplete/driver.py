@@ -29,6 +29,9 @@ from openmc.lib.deplete import (
     load_depletion_chain,
     chain_form_rxn_matrix,
     cram_solve_batch,
+    depletion_set_config,
+    depletion_execute_step,
+    depletion_free,
 )
 from .chain import Chain
 from .integration_schemes import (
@@ -133,6 +136,7 @@ class DepletionDriver:
         solver_order: int = 48,
         output_path: str | Path = 'depletion_results.h5',
         transport_schedule: str | Iterable[bool] = 'every',
+        use_cpp_kernel: bool = False,
     ):
         # --- Validate inputs ---
         cv.check_type('model', model, openmc.Model)
@@ -179,9 +183,23 @@ class DepletionDriver:
         if isinstance(scheme, str):
             cv.check_value('scheme', scheme, tuple(SCHEMES))
             self._scheme = SCHEMES[scheme]
+            self._scheme_name = scheme
         else:
             cv.check_type('scheme', scheme, IntegrationScheme)
             self._scheme = scheme
+            self._scheme_name = None
+
+        # C++ kernel mode
+        self._use_cpp_kernel = use_cpp_kernel
+        if use_cpp_kernel and self._scheme_name is None:
+            raise ValueError(
+                "use_cpp_kernel=True requires scheme to be a string "
+                "name (one of the built-in schemes).")
+
+        # Fallback scheme name for C++ kernel (LE/QI → lower-order on step 0)
+        _FALLBACK_NAMES = {'leqi': 'celi', 'si_leqi': 'si_celi'}
+        self._scheme_fallback_name = _FALLBACK_NAMES.get(
+            self._scheme_name)
 
         # Python chain (for metadata, decay matrix, nuclide info)
         self._chain = Chain.from_xml(self._chain_file)
@@ -350,6 +368,116 @@ class DepletionDriver:
         self._cached_fission_energy = None
 
         self._initialized = True
+
+        if self._use_cpp_kernel:
+            self._configure_cpp_kernel()
+
+    def _configure_cpp_kernel(self):
+        """Set up the C++ depletion kernel with configuration from Python."""
+        from openmc.lib.deplete import (
+            SOURCE_RATE_TYPE_POWER,
+            SOURCE_RATE_TYPE_POWER_DENSITY,
+            SOURCE_RATE_TYPE_SOURCE,
+            NORM_MODE_FISSION_Q,
+            NORM_MODE_ENERGY_DEPOSITION,
+        )
+
+        # Material C-API indices
+        mat_indices = np.array([
+            openmc.lib.materials[int(m)]._index
+            for m in self._burn_mat_ids
+        ], dtype=np.int32)
+
+        # Volumes array
+        volumes = np.array([
+            self._volumes[m] for m in self._burn_mat_ids
+        ], dtype=np.float64)
+
+        # Transportable mask: 1 if chain nuclide has cross-section data
+        transportable = np.array([
+            1 if name in self._transportable else 0
+            for name in self._nuclide_names
+        ], dtype=np.int32)
+
+        # Tally indices
+        rate_tally_idx = self._rate_tally._index
+        heating_tally_idx = (
+            self._heating_tally._index
+            if self._heating_tally is not None else -1)
+
+        # Reaction info
+        n_reactions = len(self._reactions)
+        fission_rx_idx = (
+            self._reactions.index('fission')
+            if 'fission' in self._reactions else -1)
+
+        # Normalization mode
+        norm_mode = (NORM_MODE_ENERGY_DEPOSITION
+                     if self._normalization_mode == 'energy-deposition'
+                     else NORM_MODE_FISSION_Q)
+
+        # Source rate type
+        srt_map = {
+            'power': SOURCE_RATE_TYPE_POWER,
+            'power_density': SOURCE_RATE_TYPE_POWER_DENSITY,
+            'source': SOURCE_RATE_TYPE_SOURCE,
+        }
+        source_rate_type = srt_map[self._source_rate_type]
+
+        depletion_set_config(
+            mat_indices, volumes, transportable,
+            rate_tally_idx, heating_tally_idx,
+            n_reactions, fission_rx_idx,
+            self._fission_q,
+            norm_mode, source_rate_type,
+            self._solver_order)
+
+    def _execute_step_cpp(self, scheme_name, n_bos_list, dt,
+                          source_rate, prev_dt):
+        """Execute one macro-timestep using the C++ kernel.
+
+        Parameters
+        ----------
+        scheme_name : str
+            Integration scheme name for C++ lookup.
+        n_bos_list : list of numpy.ndarray
+            BOS atom counts per material.
+        dt : float
+            Timestep in seconds.
+        source_rate : float
+            Power [W] or source rate [n/s].
+        prev_dt : float
+            Previous timestep in seconds (0.0 for first step).
+
+        Returns
+        -------
+        n_end_list : list of numpy.ndarray
+            EOS atom counts per material.
+        k_eff : float
+
+        """
+        n_bos_flat = np.concatenate(n_bos_list)
+        eos_flat, k_eff = depletion_execute_step(
+            scheme_name, n_bos_flat, dt, source_rate,
+            prev_dt, self._should_run_transport)
+
+        # Unpack EOS into per-material arrays
+        n_end_list = [
+            eos_flat[i * self._n_chain:(i + 1) * self._n_chain]
+            for i in range(len(self._burn_mat_ids))
+        ]
+
+        # Sync tally nuclide info from C library for _save_step
+        if self._should_run_transport:
+            self._tally_nuclides = self._rate_tally.nuclides
+            self._tally_nuc_chain_idx = np.array([
+                self._chain.nuclide_dict[n]
+                for n in self._tally_nuclides
+            ], dtype=np.int32)
+            self._cached_rxn_matrices = True  # signal tally data available
+            self._cached_k_eff = k_eff
+
+        return n_end_list, k_eff
 
     # ------------------------------------------------------------------
     # Transport dispatch
@@ -866,13 +994,25 @@ class DepletionDriver:
                     zip(self._timesteps_s, self._source_rates)):
                 self._should_run_transport = self._transport_mask[i]
 
-                scheme = self._scheme
-                if i == 0 and scheme.fallback is not None:
-                    scheme = scheme.fallback
-
                 t0 = time.time()
-                n_end, prev_bos_matrices, k_eff = self._execute_step(
-                    scheme, n, dt, source_rate, prev_bos_matrices, prev_dt)
+
+                if self._use_cpp_kernel:
+                    # C++ kernel path
+                    scheme_name = self._scheme_name
+                    if i == 0 and self._scheme_fallback_name is not None:
+                        scheme_name = self._scheme_fallback_name
+                    n_end, k_eff = self._execute_step_cpp(
+                        scheme_name, n, dt, source_rate,
+                        prev_dt if prev_dt is not None else 0.0)
+                else:
+                    # Python interpreter path
+                    scheme = self._scheme
+                    if i == 0 and scheme.fallback is not None:
+                        scheme = scheme.fallback
+                    n_end, prev_bos_matrices, k_eff = self._execute_step(
+                        scheme, n, dt, source_rate,
+                        prev_bos_matrices, prev_dt)
+
                 proc_time = time.time() - t0
 
                 self._save_step(i, n, n_end, t, dt, source_rate,
@@ -883,6 +1023,8 @@ class DepletionDriver:
                 t += dt
 
         finally:
+            if self._use_cpp_kernel:
+                depletion_free()
             openmc.lib.finalize()
             self._initialized = False
 

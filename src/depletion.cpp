@@ -696,17 +696,9 @@ extern "C" int openmc_depletion_execute_step(
   const double* n_bos_flat,
   double dt,
   double source_rate,
-  const int* prev_indptr,
-  const int* prev_indices,
-  const double* prev_data,
-  const int* prev_nnz_per_mat,
   double prev_dt,
   int run_transport,
   double* out_eos_flat,
-  int* out_bos_indptr,
-  int* out_bos_indices,
-  double* out_bos_data,
-  int* out_bos_nnz_per_mat,
   double* out_k_eff)
 {
   using namespace openmc;
@@ -737,33 +729,18 @@ extern "C" int openmc_depletion_execute_step(
         n_bos_flat + (m + 1) * n_chain);
     }
 
-    // Unpack previous step matrices if provided
-    vector<CSCMatrix> prev_mats_storage;
-    const vector<CSCMatrix>* prev_mats_ptr = nullptr;
-    if (prev_indptr && prev_indices && prev_data && prev_nnz_per_mat) {
-      prev_mats_storage.reserve(n_mats);
-      int ip_offset = 0;
-      int d_offset = 0;
-      for (int m = 0; m < n_mats; ++m) {
-        int mat_nnz = prev_nnz_per_mat[m];
-        vector<int> ip(prev_indptr + ip_offset,
-          prev_indptr + ip_offset + n_chain + 1);
-        vector<int> idx(prev_indices + d_offset,
-          prev_indices + d_offset + mat_nnz);
-        vector<double> dat(prev_data + d_offset,
-          prev_data + d_offset + mat_nnz);
-        CSCPattern pat(n_chain, std::move(ip), std::move(idx));
-        prev_mats_storage.emplace_back(std::move(pat), std::move(dat));
-        ip_offset += n_chain + 1;
-        d_offset += mat_nnz;
-      }
-      prev_mats_ptr = &prev_mats_storage;
-    }
+    // Use previous step matrices from internal state
+    const vector<CSCMatrix>* prev_mats_ptr =
+      state.prev_bos_matrices.empty() ? nullptr : &state.prev_bos_matrices;
 
     // Execute the scheme step
     SchemeStepResult result = execute_scheme_step(
       *scheme, state, n_bos, dt, source_rate,
       prev_mats_ptr, prev_dt, run_transport != 0);
+
+    // Store BOS matrices for next step's PREV_STEP reference
+    state.prev_bos_matrices = std::move(result.bos_matrices);
+    state.prev_dt = dt;
 
     // Pack EOS densities
     if (out_eos_flat) {
@@ -771,34 +748,6 @@ extern "C" int openmc_depletion_execute_step(
         std::copy(result.eos_densities[m].begin(),
           result.eos_densities[m].end(),
           out_eos_flat + m * n_chain);
-      }
-    }
-
-    // Pack BOS matrices (for PREV_STEP on next step)
-    if (out_bos_nnz_per_mat) {
-      for (int m = 0; m < n_mats; ++m) {
-        if (m < static_cast<int>(result.bos_matrices.size())) {
-          out_bos_nnz_per_mat[m] = result.bos_matrices[m].nnz();
-        } else {
-          out_bos_nnz_per_mat[m] = 0;
-        }
-      }
-    }
-
-    if (out_bos_indices && out_bos_data && out_bos_indptr) {
-      int ip_offset = 0;
-      int d_offset = 0;
-      for (int m = 0; m < static_cast<int>(result.bos_matrices.size()); ++m) {
-        const auto& mat = result.bos_matrices[m];
-        int mat_nnz = mat.nnz();
-        std::copy(mat.indptr().begin(), mat.indptr().end(),
-          out_bos_indptr + ip_offset);
-        std::copy(mat.indices().begin(), mat.indices().end(),
-          out_bos_indices + d_offset);
-        std::copy(mat.data().begin(), mat.data().end(),
-          out_bos_data + d_offset);
-        ip_offset += n_chain + 1;
-        d_offset += mat_nnz;
       }
     }
 
