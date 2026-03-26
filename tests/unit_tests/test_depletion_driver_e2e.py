@@ -1,6 +1,6 @@
-"""End-to-end validation: DepletionDriver vs CoupledOperator + Integrator.
+"""End-to-end validation: DepletionManager vs CoupledOperator + Integrator.
 
-Tests compare the new DepletionDriver against:
+Tests compare the new DepletionManager against:
 1. Decay-only: exact comparison (no stochastic transport variability)
 2. Coupled transport: physics consistency checks (k_eff reasonable,
    actinides deplete, fission products appear)
@@ -16,7 +16,7 @@ import pytest
 import openmc
 import openmc.deplete
 from openmc.deplete import Results
-from openmc.deplete.driver import DepletionDriver
+from openmc.deplete.driver import DepletionManager
 
 # Simple chain files shipped with the tests
 CHAIN_SIMPLE = Path(__file__).parents[1] / 'chain_simple.xml'
@@ -110,7 +110,7 @@ def _make_decay_model():
 # ------------------------------------------------------------------
 
 def test_decay_only_vs_coupled_operator(run_in_tmpdir):
-    """Decay-only: DepletionDriver results should match CoupledOperator."""
+    """Decay-only: DepletionManager results should match CoupledOperator."""
     if not CHAIN_DECAY.exists():
         pytest.skip("chain_simple_decay.xml not found")
 
@@ -133,20 +133,20 @@ def test_decay_only_vs_coupled_operator(run_in_tmpdir):
     res_old = Results(op.output_dir / 'depletion_results.h5')
     os.chdir('..')
 
-    # --- New: DepletionDriver with predictor, power=0 ---
+    # --- New: DepletionManager with predictor, power=0 ---
     new_dir = Path('new_run')
     new_dir.mkdir()
     os.chdir(new_dir)
 
     model_new = _make_decay_model()
-    driver = DepletionDriver(
+    mgr = DepletionManager(
         model_new, str(CHAIN_DECAY), dt, 0.0,
         source_rate_type='power',
         scheme='predictor',
         normalization_mode='fission-q',
     )
     t0 = time.time()
-    res_new = driver.run()
+    res_new = mgr.run()
     new_wall = time.time() - t0
     os.chdir('..')
 
@@ -195,11 +195,11 @@ def test_decay_only_vs_coupled_operator(run_in_tmpdir):
 
 
 # ------------------------------------------------------------------
-# Test 2: Coupled transport -- physics validation
+# Test 2: Coupled transport -- physics validation (predictor)
 # ------------------------------------------------------------------
 
 def test_coupled_predictor_physics(run_in_tmpdir):
-    """Verify DepletionDriver(predictor) produces physically sensible results."""
+    """Verify DepletionManager(predictor) produces physically sensible results."""
     if not CHAIN_SIMPLE.exists():
         pytest.skip("chain_simple.xml not found")
 
@@ -207,7 +207,7 @@ def test_coupled_predictor_physics(run_in_tmpdir):
     power = 174.0  # Watts
 
     model = _make_pin_model()
-    driver = DepletionDriver(
+    mgr = DepletionManager(
         model, str(CHAIN_SIMPLE), dt, power,
         source_rate_type='power',
         scheme='predictor',
@@ -215,7 +215,7 @@ def test_coupled_predictor_physics(run_in_tmpdir):
     )
 
     t0 = time.time()
-    res = driver.run()
+    res = mgr.run()
     wall = time.time() - t0
 
     mat_id = list(res[0].index_mat.keys())[0]
@@ -234,14 +234,9 @@ def test_coupled_predictor_physics(run_in_tmpdir):
     print(f"{'='*60}")
 
     # Physics checks
-    # 1. k_eff should be positive and reasonable for a LEU pin cell
     assert 0.5 < k_vals[0, 0] < 2.5, \
         f"k_eff={k_vals[0,0]:.4f} is not physically reasonable"
-
-    # 2. U235 should be present (>0 atoms)
     assert u235[0] > 0, "U235 atoms should be positive"
-
-    # 3. U238 should be present
     assert u238[0] > 0, "U238 atoms should be positive"
 
 
@@ -250,7 +245,7 @@ def test_coupled_predictor_physics(run_in_tmpdir):
 # ------------------------------------------------------------------
 
 def test_coupled_cecm_physics(run_in_tmpdir):
-    """Verify DepletionDriver(cecm) produces physically sensible results."""
+    """Verify DepletionManager(cecm) produces physically sensible results."""
     if not CHAIN_SIMPLE.exists():
         pytest.skip("chain_simple.xml not found")
 
@@ -258,7 +253,7 @@ def test_coupled_cecm_physics(run_in_tmpdir):
     power = 174.0
 
     model = _make_pin_model()
-    driver = DepletionDriver(
+    mgr = DepletionManager(
         model, str(CHAIN_SIMPLE), dt, power,
         source_rate_type='power',
         scheme='cecm',
@@ -266,7 +261,7 @@ def test_coupled_cecm_physics(run_in_tmpdir):
     )
 
     t0 = time.time()
-    res = driver.run()
+    res = mgr.run()
     wall = time.time() - t0
 
     mat_id = list(res[0].index_mat.keys())[0]
@@ -298,7 +293,7 @@ def test_multistep_predictor_physics(run_in_tmpdir):
     power = 174.0
 
     model = _make_pin_model()
-    driver = DepletionDriver(
+    mgr = DepletionManager(
         model, str(CHAIN_SIMPLE), dt, power,
         source_rate_type='power',
         scheme='predictor',
@@ -306,7 +301,7 @@ def test_multistep_predictor_physics(run_in_tmpdir):
     )
 
     t0 = time.time()
-    res = driver.run()
+    res = mgr.run()
     wall = time.time() - t0
 
     _, k_vals = res.get_keff()
@@ -317,88 +312,17 @@ def test_multistep_predictor_physics(run_in_tmpdir):
     print(f"  k_eff per step: {k_vals[:, 0]}")
     print(f"{'='*60}")
 
-    # All k_eff values should be reasonable
     for i in range(len(k_vals)):
         assert 0.5 < k_vals[i, 0] < 2.5, \
             f"Step {i}: k_eff={k_vals[i,0]:.4f} out of range"
 
 
 # ------------------------------------------------------------------
-# Test 5: C++ kernel vs Python interpreter -- numerical comparison
+# Test 5: Multi-step CECM
 # ------------------------------------------------------------------
 
-def test_cpp_kernel_predictor(run_in_tmpdir):
-    """Verify C++ kernel produces physically sensible results."""
-    if not CHAIN_SIMPLE.exists():
-        pytest.skip("chain_simple.xml not found")
-
-    dt = [5.0 * 86400.0]  # 5 days
-    power = 174.0
-
-    model = _make_pin_model()
-    driver = DepletionDriver(
-        model, str(CHAIN_SIMPLE), dt, power,
-        source_rate_type='power',
-        scheme='predictor',
-        normalization_mode='fission-q',
-        use_cpp_kernel=True,
-    )
-
-    res = driver.run()
-    mat_id = list(res[0].index_mat.keys())[0]
-
-    _, k_vals = res.get_keff()
-    _, u235 = res.get_atoms(mat_id, 'U235')
-    _, u238 = res.get_atoms(mat_id, 'U238')
-
-    print(f"\n{'='*60}")
-    print(f"C++ kernel predictor (1 step, 5 days, {power} W)")
-    print(f"  k_eff: {k_vals}")
-    print(f"  U235: EOS={u235[0]:.6e}")
-    print(f"  U238: EOS={u238[0]:.6e}")
-    print(f"{'='*60}")
-
-    # Same physics checks as Python path
-    assert 0.5 < k_vals[0, 0] < 2.5
-    assert u235[0] > 0
-    assert u238[0] > 0
-
-
-def test_cpp_kernel_cecm(run_in_tmpdir):
-    """Verify C++ kernel CECM produces physically sensible results."""
-    if not CHAIN_SIMPLE.exists():
-        pytest.skip("chain_simple.xml not found")
-
-    dt = [5.0 * 86400.0]
-    power = 174.0
-
-    model = _make_pin_model()
-    driver = DepletionDriver(
-        model, str(CHAIN_SIMPLE), dt, power,
-        source_rate_type='power',
-        scheme='cecm',
-        normalization_mode='fission-q',
-        use_cpp_kernel=True,
-    )
-
-    res = driver.run()
-    mat_id = list(res[0].index_mat.keys())[0]
-
-    _, k_vals = res.get_keff()
-    _, u235 = res.get_atoms(mat_id, 'U235')
-
-    print(f"\n{'='*60}")
-    print(f"C++ kernel CECM (1 step, 5 days, {power} W)")
-    print(f"  k_eff: {k_vals}")
-    print(f"  U235: EOS={u235[0]:.6e}")
-    print(f"{'='*60}")
-
-    assert 0.5 < k_vals[0, 0] < 2.5
-    assert u235[0] > 0
-
-
-def test_cpp_kernel_multistep(run_in_tmpdir):
-    """Verify C++ kernel multi-step predictor is consistent."""
+def test_multistep_cecm_physics(run_in_tmpdir):
+    """Verify multi-step CECM produces consistent k_eff across steps."""
     if not CHAIN_SIMPLE.exists():
         pytest.skip("chain_simple.xml not found")
 
@@ -407,19 +331,22 @@ def test_cpp_kernel_multistep(run_in_tmpdir):
     power = 174.0
 
     model = _make_pin_model()
-    driver = DepletionDriver(
+    mgr = DepletionManager(
         model, str(CHAIN_SIMPLE), dt, power,
         source_rate_type='power',
-        scheme='predictor',
+        scheme='cecm',
         normalization_mode='fission-q',
-        use_cpp_kernel=True,
     )
 
-    res = driver.run()
+    t0 = time.time()
+    res = mgr.run()
+    wall = time.time() - t0
+
     _, k_vals = res.get_keff()
 
     print(f"\n{'='*60}")
-    print(f"C++ kernel multi-step predictor ({n_steps} steps)")
+    print(f"Multi-step CECM ({n_steps} steps)")
+    print(f"  Wall time: {wall:.2f} s")
     print(f"  k_eff per step: {k_vals[:, 0]}")
     print(f"{'='*60}")
 

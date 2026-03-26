@@ -1,13 +1,13 @@
-"""Depletion driver that interprets integration scheme graphs.
+"""Depletion manager that interprets integration scheme graphs.
 
-This module provides :class:`DepletionDriver`, a single entry point for
+This module provides :class:`DepletionManager`, a single entry point for
 running depletion simulations.  It replaces the ``Integrator`` +
 ``Operator`` pattern with a cleaner separation: the declarative
 integration schemes (in :mod:`openmc.deplete.integration_schemes`) define
-*what* to compute, while the driver handles *how* to execute.
+*what* to compute, while the manager handles *how* to execute.
 
-Heavy lifting (matrix assembly and CRAM solves) is delegated to C++ via
-:mod:`openmc.lib.deplete`.
+Heavy lifting (matrix assembly, scheme interpretation, and CRAM solves) is
+delegated to C++ via :mod:`openmc.lib.deplete`.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-from scipy.sparse import csc_array
 
 from openmc.data import DataLibrary
 
@@ -27,25 +26,19 @@ import openmc.checkvalue as cv
 import openmc.lib
 from openmc.lib.deplete import (
     load_depletion_chain,
-    chain_form_rxn_matrix,
-    cram_solve_batch,
     depletion_set_config,
     depletion_execute_step,
     depletion_free,
 )
 from .chain import Chain
-from .integration_schemes import (
-    BOS, PREV_STEP, PREV_ITER,
-    Transport, Expm, AverageMatrix, Iterate,
-    IntegrationScheme, SCHEMES,
-)
+from .integration_schemes import SCHEMES, IntegrationScheme
 from .stepresult import StepResult
 from .reaction_rates import ReactionRates
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-__all__ = ['DepletionDriver']
+__all__ = ['DepletionManager']
 
 # eV per Joule
 EV_PER_JOULE = 1.602176634e-19
@@ -84,7 +77,7 @@ def _get_nuclides_with_data():
     return nuclides
 
 
-class DepletionDriver:
+class DepletionManager:
     """Run a depletion simulation by interpreting an integration scheme.
 
     Parameters
@@ -104,9 +97,9 @@ class DepletionDriver:
         Units for *timesteps*: ``'s'``, ``'min'``, ``'h'``, ``'d'``,
         ``'a'`` (Julian year), or ``'MWd/kg'`` (burnup).
         Default ``'s'``.
-    scheme : str or IntegrationScheme, optional
-        Integration scheme name (key in ``SCHEMES``) or a custom
-        :class:`IntegrationScheme` instance.  Default ``'cecm'``.
+    scheme : str, optional
+        Integration scheme name (key in ``SCHEMES``).  Default
+        ``'cecm'``.
     normalization_mode : {'fission-q', 'energy-deposition'}, optional
         How power is converted to a source rate.  Ignored when
         *source_rate_type* is ``'source'``.  Default ``'fission-q'``.
@@ -131,12 +124,11 @@ class DepletionDriver:
         *,
         source_rate_type: str = 'power',
         timestep_units: str = 's',
-        scheme: str | IntegrationScheme = 'cecm',
+        scheme: str = 'cecm',
         normalization_mode: str = 'fission-q',
         solver_order: int = 48,
         output_path: str | Path = 'depletion_results.h5',
         transport_schedule: str | Iterable[bool] = 'every',
-        use_cpp_kernel: bool = False,
     ):
         # --- Validate inputs ---
         cv.check_type('model', model, openmc.Model)
@@ -148,6 +140,8 @@ class DepletionDriver:
         cv.check_value('normalization_mode', normalization_mode,
                         ('fission-q', 'energy-deposition'))
         cv.check_value('solver_order', solver_order, (16, 48))
+        cv.check_type('scheme', scheme, str)
+        cv.check_value('scheme', scheme, tuple(SCHEMES))
 
         self._model = model
         self._chain_file = Path(chain_file)
@@ -155,6 +149,12 @@ class DepletionDriver:
         self._normalization_mode = normalization_mode
         self._solver_order = solver_order
         self._output_path = Path(output_path)
+        self._scheme = SCHEMES[scheme]
+        self._scheme_name = scheme
+
+        # Fallback scheme name for C++ kernel (LE/QI → lower-order on step 0)
+        _FALLBACK_NAMES = {'leqi': 'celi', 'si_leqi': 'si_celi'}
+        self._scheme_fallback_name = _FALLBACK_NAMES.get(self._scheme_name)
 
         # Timesteps → seconds
         timesteps = np.asarray(list(timesteps), dtype=np.float64)
@@ -179,28 +179,6 @@ class DepletionDriver:
                 f"number of timesteps ({n_steps}).")
         self._source_rates = source_rates
 
-        # Resolve scheme
-        if isinstance(scheme, str):
-            cv.check_value('scheme', scheme, tuple(SCHEMES))
-            self._scheme = SCHEMES[scheme]
-            self._scheme_name = scheme
-        else:
-            cv.check_type('scheme', scheme, IntegrationScheme)
-            self._scheme = scheme
-            self._scheme_name = None
-
-        # C++ kernel mode
-        self._use_cpp_kernel = use_cpp_kernel
-        if use_cpp_kernel and self._scheme_name is None:
-            raise ValueError(
-                "use_cpp_kernel=True requires scheme to be a string "
-                "name (one of the built-in schemes).")
-
-        # Fallback scheme name for C++ kernel (LE/QI → lower-order on step 0)
-        _FALLBACK_NAMES = {'leqi': 'celi', 'si_leqi': 'si_celi'}
-        self._scheme_fallback_name = _FALLBACK_NAMES.get(
-            self._scheme_name)
-
         # Python chain (for metadata, decay matrix, nuclide info)
         self._chain = Chain.from_xml(self._chain_file)
 
@@ -208,9 +186,6 @@ class DepletionDriver:
         # _initialize() after openmc.lib.init() since finalize() clears it.
         # We still load here to validate the file path.
         load_depletion_chain(str(self._chain_file))
-
-        # Precompute the decay matrix (constant for all steps)
-        self._A_decay = self._chain.decay_matrix
 
         # Build fission Q vector for normalization (indexed by chain nuclide)
         self._fission_q = np.zeros(len(self._chain))
@@ -365,12 +340,9 @@ class DepletionDriver:
         # Cached transport results
         self._cached_rxn_matrices = None
         self._cached_k_eff = None
-        self._cached_fission_energy = None
 
         self._initialized = True
-
-        if self._use_cpp_kernel:
-            self._configure_cpp_kernel()
+        self._configure_cpp_kernel()
 
     def _configure_cpp_kernel(self):
         """Set up the C++ depletion kernel with configuration from Python."""
@@ -432,8 +404,8 @@ class DepletionDriver:
             norm_mode, source_rate_type,
             self._solver_order)
 
-    def _execute_step_cpp(self, scheme_name, n_bos_list, dt,
-                          source_rate, prev_dt):
+    def _execute_step(self, scheme_name, n_bos_list, dt,
+                      source_rate, prev_dt):
         """Execute one macro-timestep using the C++ kernel.
 
         Parameters
@@ -480,406 +452,8 @@ class DepletionDriver:
         return n_end_list, k_eff
 
     # ------------------------------------------------------------------
-    # Transport dispatch
-    # ------------------------------------------------------------------
-
-    def _update_materials(self, densities_per_mat):
-        """Push atom counts into C library materials for transport.
-
-        Updates material compositions and the tally nuclide list so that
-        only nuclides with nonzero density are scored.
-
-        Parameters
-        ----------
-        densities_per_mat : list of numpy.ndarray
-            Atom counts (not densities) for each burnable material,
-            indexed by chain nuclide.
-
-        """
-        nonzero_nucs = set()
-        for i, mat_id in enumerate(self._burn_mat_ids):
-            vol = self._volumes[mat_id]
-            n_atoms = densities_per_mat[i]  # shape (n_chain,)
-            nuclides = []
-            atom_densities = []
-            for j, name in enumerate(self._nuclide_names):
-                if name not in self._transportable:
-                    continue
-                dens = n_atoms[j] / vol * 1e-24  # atom/b-cm
-                if dens > 0.0:
-                    nuclides.append(name)
-                    atom_densities.append(dens)
-                    nonzero_nucs.add(name)
-            if nuclides:
-                lib_mat = openmc.lib.materials[int(mat_id)]
-                lib_mat.set_densities(nuclides, atom_densities)
-
-        # Update tally nuclide list to only include nuclides with nonzero
-        # density (avoids scoring 1000+ zero-density nuclides).
-        nuc_names = [n for n in self._nuclide_names if n in nonzero_nucs]
-        nuc_chain_idx = np.array(
-            [self._chain.nuclide_dict[n] for n in nuc_names], dtype=np.int32)
-        self._tally_nuclides = nuc_names
-        self._tally_nuc_chain_idx = nuc_chain_idx
-        self._rate_tally.nuclides = nuc_names
-
-    def _extract_rates(self, densities_per_mat):
-        """Extract reaction-rate matrices and fission energy from tallies.
-
-        Must be called after a transport run has completed and tally
-        results are available.
-
-        Parameters
-        ----------
-        densities_per_mat : list of numpy.ndarray
-            Atom counts for each burnable material (same as passed to
-            :meth:`_update_materials`).
-
-        Returns
-        -------
-        rxn_matrices : list of csc_array
-            Reaction-rate matrices ``A_rxn`` for each material.
-        fission_energy : float
-            Total fission energy in eV per source particle across all
-            materials.
-
-        """
-        # Extract tally results
-        tally_means = self._rate_tally.mean
-        n_mats = len(self._burn_mat_ids)
-        n_nucs = len(self._tally_nuclides)
-        n_rxns = len(self._reactions)
-        tally_means = tally_means.reshape(n_mats, n_nucs, n_rxns)
-
-        # Energy deposition tally
-        if self._heating_tally is not None:
-            heating_means = self._heating_tally.mean.reshape(n_mats)
-        else:
-            heating_means = None
-
-        # Determine fission score index once
-        fission_idx = (self._reactions.index('fission')
-                       if 'fission' in self._reactions else None)
-
-        rxn_matrices = []
-        total_fission_energy = 0.0
-
-        for i, mat_id in enumerate(self._burn_mat_ids):
-            vol = self._volumes[mat_id]
-            n_atoms = densities_per_mat[i]
-
-            # rates shape: (n_nucs, n_rxns)  in [(reactions/src)*b-cm/atom]
-            rates = tally_means[i]
-
-            # Divide by volume in b-cm to get [(reactions/src)/atom]
-            vol_b_cm = vol * 1e24
-            rates_per_atom = rates / vol_b_cm
-
-            # Accumulate fission energy [eV/src]
-            if self._normalization_mode == 'fission-q' and fission_idx is not None:
-                for j, name in enumerate(self._tally_nuclides):
-                    chain_idx = self._chain.nuclide_dict[name]
-                    atom_per_bcm = n_atoms[chain_idx] / vol_b_cm
-                    fission_rate = rates[j, fission_idx] * atom_per_bcm
-                    total_fission_energy += (
-                        fission_rate * self._fission_q[chain_idx])
-            elif self._normalization_mode == 'energy-deposition':
-                total_fission_energy += heating_means[i]
-
-            # Form A_rxn via C++
-            A_rxn = chain_form_rxn_matrix(
-                rates_per_atom, self._tally_nuc_chain_idx, n_rxns)
-            rxn_matrices.append(A_rxn)
-
-        return rxn_matrices, total_fission_energy
-
-    def _run_transport_and_extract(self, densities_per_mat):
-        """Run OpenMC transport and extract reaction-rate matrices.
-
-        Parameters
-        ----------
-        densities_per_mat : list of numpy.ndarray
-            Atom counts (not densities) for each burnable material,
-            indexed by chain nuclide.
-
-        Returns
-        -------
-        rxn_matrices : list of csc_array
-            Reaction-rate matrices A_rxn for each material.
-        k_eff : float
-            Effective multiplication factor.
-        fission_energy : float
-            Total fission energy in eV per source particle across all
-            materials.
-
-        """
-        self._update_materials(densities_per_mat)
-
-        openmc.lib.reset()
-        openmc.lib.run()
-
-        k_eff = openmc.lib.keff()[0]
-        rxn_matrices, fission_energy = self._extract_rates(densities_per_mat)
-
-        return rxn_matrices, k_eff, fission_energy
-
-    def _handle_transport(self, node, densities, matrices, source_rate):
-        """Process a Transport node.
-
-        Parameters
-        ----------
-        node : Transport
-        densities : dict
-            Mapping from density references to list of ndarray.
-        matrices : dict
-            Mapping from matrix references to list of csc_array.
-        source_rate : float
-            Power [W] or source rate [n/s].
-
-        Returns
-        -------
-        k_eff : float
-
-        """
-        # Resolve which density vector to use
-        dens_per_mat = self._resolve_density(node.density, densities)
-
-        # Run transport or use cache
-        if self._should_run_transport:
-            rxn_matrices, k_eff, fission_energy = \
-                self._run_transport_and_extract(dens_per_mat)
-            self._cached_rxn_matrices = rxn_matrices
-            self._cached_k_eff = k_eff
-            self._cached_fission_energy = fission_energy
-        else:
-            rxn_matrices = self._cached_rxn_matrices
-            k_eff = self._cached_k_eff
-            fission_energy = self._cached_fission_energy
-
-        # Compute normalization factor s
-        if self._source_rate_type == 'source':
-            s = source_rate
-        else:
-            # source_rate is power in Watts
-            if fission_energy == 0.0:
-                warnings.warn(
-                    "Fission energy from transport is zero but power "
-                    "normalization was requested.  The source "
-                    "normalization factor will be set to zero, meaning "
-                    "only radioactive decay will be applied this step.",
-                    stacklevel=2)
-                s = 0.0
-            else:
-                s = source_rate / (fission_energy * EV_PER_JOULE)
-
-        # Combine: A = A_decay + s * A_rxn
-        combined = []
-        for A_rxn in rxn_matrices:
-            combined.append(self._A_decay + s * A_rxn)
-        matrices[node] = combined
-
-        return k_eff
-
-    def _handle_expm(self, node, densities, matrices, dt, prev_dt,
-                     avg_matrices=None):
-        """Process an Expm node (matrix exponential / CRAM solve).
-
-        Parameters
-        ----------
-        node : Expm
-        densities : dict
-        matrices : dict
-        dt : float
-            Timestep in seconds.
-        prev_dt : float or None
-            Previous timestep in seconds (for LE/QI weights).
-        avg_matrices : dict or None
-            Running average matrices for SI iterate.
-
-        """
-        # Build combined matrix per material
-        n_mats = len(self._burn_mat_ids)
-        combined = [csc_array((self._n_chain, self._n_chain))
-                    for _ in range(n_mats)]
-
-        for term in node.terms:
-            # Resolve weight
-            if callable(term.weight):
-                w = term.weight(prev_dt, dt)
-            else:
-                w = term.weight
-
-            # Resolve matrix reference
-            if isinstance(term.matrix, AverageMatrix):
-                mats = avg_matrices[term.matrix.source]
-            elif term.matrix is PREV_STEP:
-                mats = matrices[PREV_STEP]
-            else:
-                # Transport node
-                mats = matrices[term.matrix]
-
-            for k in range(n_mats):
-                combined[k] = combined[k] + w * mats[k]
-
-        # Resolve input density
-        input_dens = self._resolve_density(node.density, densities)
-
-        # CRAM solve
-        results = cram_solve_batch(combined, input_dens, dt,
-                                   order=self._solver_order)
-        densities[node] = results
-
-    def _handle_iterate(self, node, densities, matrices, dt, prev_dt,
-                        source_rate, last_expm_before):
-        """Process an Iterate node (stochastic implicit iterations).
-
-        Parameters
-        ----------
-        node : Iterate
-        densities : dict
-        matrices : dict
-        dt : float
-        prev_dt : float or None
-        source_rate : float
-        last_expm_before : Expm or None
-            Last Expm node computed before entering this Iterate, used
-            to seed PREV_ITER.
-
-        Returns
-        -------
-        k_eff : float
-            k-effective from the last transport in the iterate body.
-
-        """
-        # Seed PREV_ITER from last computed Expm
-        if last_expm_before is not None:
-            densities[PREV_ITER] = densities[last_expm_before]
-        else:
-            densities[PREV_ITER] = densities[BOS]
-
-        # Running averages for AverageMatrix nodes
-        avg_matrices = {}
-
-        k_eff = self._cached_k_eff or 1.0
-
-        for j in range(1, node.n_iterations + 1):
-            for op in node.body:
-                if isinstance(op, Transport):
-                    k_eff = self._handle_transport(
-                        op, densities, matrices, source_rate)
-
-                    # Update running average
-                    if j == 1:
-                        avg_matrices[op] = [
-                            m.copy() for m in matrices[op]]
-                    else:
-                        alpha = 1.0 / j
-                        for k in range(len(self._burn_mat_ids)):
-                            avg_matrices[op][k] = (
-                                alpha * matrices[op][k]
-                                + (1 - alpha) * avg_matrices[op][k])
-
-                elif isinstance(op, Expm):
-                    self._handle_expm(
-                        op, densities, matrices, dt, prev_dt,
-                        avg_matrices=avg_matrices)
-
-            # Update PREV_ITER to last Expm in body
-            last_body_expm = self._find_last_expm(node.body)
-            if last_body_expm is not None:
-                densities[PREV_ITER] = densities[last_body_expm]
-
-        return k_eff
-
-    # ------------------------------------------------------------------
-    # Scheme interpreter
-    # ------------------------------------------------------------------
-
-    def _execute_step(self, scheme, n_bos_list, dt, source_rate,
-                      prev_bos_matrices, prev_dt):
-        """Execute one macro-timestep of a depletion scheme.
-
-        Parameters
-        ----------
-        scheme : IntegrationScheme
-        n_bos_list : list of numpy.ndarray
-            BOS atom counts per material (each shape ``(n_chain,)``).
-        dt : float
-            Timestep in seconds.
-        source_rate : float
-        prev_bos_matrices : list of csc_array or None
-            BOS matrices from previous step (for PREV_STEP reference).
-        prev_dt : float or None
-
-        Returns
-        -------
-        n_end_list : list of numpy.ndarray
-            EOS atom counts per material.
-        next_prev_bos_matrices : list of csc_array
-            BOS matrices for the *next* step's PREV_STEP reference.
-        k_eff : float
-
-        """
-        densities = {BOS: n_bos_list}
-        matrices = {}
-        if prev_bos_matrices is not None:
-            matrices[PREV_STEP] = prev_bos_matrices
-
-        bos_transport = None
-        k_eff = self._cached_k_eff or 1.0
-        last_expm = None  # tracks last Expm before an Iterate
-
-        for op in scheme.steps:
-            if isinstance(op, Transport):
-                k_eff = self._handle_transport(
-                    op, densities, matrices, source_rate)
-                if bos_transport is None:
-                    bos_transport = op
-
-            elif isinstance(op, Expm):
-                self._handle_expm(
-                    op, densities, matrices, dt, prev_dt)
-                last_expm = op
-
-            elif isinstance(op, Iterate):
-                k_eff = self._handle_iterate(
-                    op, densities, matrices, dt, prev_dt, source_rate,
-                    last_expm)
-
-        # Find final density (last Expm in the entire scheme)
-        final_expm = self._find_last_expm(scheme.steps)
-        n_end_list = densities[final_expm]
-
-        # BOS matrices for next step's PREV_STEP
-        next_prev_bos_matrices = (
-            matrices[bos_transport] if bos_transport is not None else None)
-
-        return n_end_list, next_prev_bos_matrices, k_eff
-
-    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _resolve_density(ref, densities):
-        """Look up a density reference in the densities dict."""
-        if ref in densities:
-            return densities[ref]
-        raise KeyError(f"Density reference {ref!r} not found. Available: "
-                       f"{list(densities.keys())}")
-
-    @staticmethod
-    def _find_last_expm(steps):
-        """Find the last Expm node in a step list, including Iterate bodies."""
-        last = None
-        for op in steps:
-            if isinstance(op, Expm):
-                last = op
-            elif isinstance(op, Iterate):
-                for inner in op.body:
-                    if isinstance(inner, Expm):
-                        last = inner
-        return last
 
     def _get_initial_compositions(self):
         """Extract initial atom counts from the model's materials.
@@ -986,7 +560,6 @@ class DepletionDriver:
                 self._initialize()
 
             n = self._get_initial_compositions()
-            prev_bos_matrices = None
             prev_dt = None
             t = 0.0
 
@@ -996,22 +569,12 @@ class DepletionDriver:
 
                 t0 = time.time()
 
-                if self._use_cpp_kernel:
-                    # C++ kernel path
-                    scheme_name = self._scheme_name
-                    if i == 0 and self._scheme_fallback_name is not None:
-                        scheme_name = self._scheme_fallback_name
-                    n_end, k_eff = self._execute_step_cpp(
-                        scheme_name, n, dt, source_rate,
-                        prev_dt if prev_dt is not None else 0.0)
-                else:
-                    # Python interpreter path
-                    scheme = self._scheme
-                    if i == 0 and scheme.fallback is not None:
-                        scheme = scheme.fallback
-                    n_end, prev_bos_matrices, k_eff = self._execute_step(
-                        scheme, n, dt, source_rate,
-                        prev_bos_matrices, prev_dt)
+                scheme_name = self._scheme_name
+                if i == 0 and self._scheme_fallback_name is not None:
+                    scheme_name = self._scheme_fallback_name
+                n_end, k_eff = self._execute_step(
+                    scheme_name, n, dt, source_rate,
+                    prev_dt if prev_dt is not None else 0.0)
 
                 proc_time = time.time() - t0
 
@@ -1023,8 +586,7 @@ class DepletionDriver:
                 t += dt
 
         finally:
-            if self._use_cpp_kernel:
-                depletion_free()
+            depletion_free()
             openmc.lib.finalize()
             self._initialized = False
 

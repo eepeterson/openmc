@@ -1,17 +1,11 @@
-"""Tests for DepletionDriver construction and scheme interpreter helpers."""
+"""Tests for DepletionManager construction and configuration."""
 
 import numpy as np
 import pytest
-from scipy.sparse import csc_array, eye as speye
 
 import openmc
-from openmc.deplete.driver import DepletionDriver, _TIMESTEP_UNITS
-from openmc.deplete.integration_schemes import (
-    BOS, PREV_STEP, PREV_ITER,
-    Transport, Expm, MatrixTerm, AverageMatrix, Iterate,
-    IntegrationScheme, SCHEMES,
-    predictor, cecm,
-)
+from openmc.deplete.driver import DepletionManager, _TIMESTEP_UNITS
+from openmc.deplete.integration_schemes import SCHEMES
 
 
 # ---------------------------------------------------------------------------
@@ -67,88 +61,48 @@ def chain_file():
 
 def test_constructor_validates_source_rate_type(simple_model, chain_file):
     with pytest.raises(ValueError, match='source_rate_type'):
-        DepletionDriver(simple_model, chain_file, [1.0], 1e6,
+        DepletionManager(simple_model, chain_file, [1.0], 1e6,
                          source_rate_type='invalid')
 
 
 def test_constructor_validates_scheme_name(simple_model, chain_file):
     with pytest.raises(ValueError, match='scheme'):
-        DepletionDriver(simple_model, chain_file, [1.0], 1e6,
+        DepletionManager(simple_model, chain_file, [1.0], 1e6,
                          scheme='nonexistent_scheme')
 
 
 def test_constructor_validates_solver_order(simple_model, chain_file):
     with pytest.raises(ValueError, match='solver_order'):
-        DepletionDriver(simple_model, chain_file, [1.0], 1e6,
+        DepletionManager(simple_model, chain_file, [1.0], 1e6,
                          solver_order=32)
 
 
 def test_constructor_validates_source_rate_length(simple_model, chain_file):
     with pytest.raises(ValueError, match='Length of source_rates'):
-        DepletionDriver(simple_model, chain_file, [1.0, 2.0], [1e6])
+        DepletionManager(simple_model, chain_file, [1.0, 2.0], [1e6])
 
 
-def test_constructor_accepts_scheme_instance(simple_model, chain_file):
-    driver = DepletionDriver(simple_model, chain_file, [1.0], 1e6,
-                              scheme=predictor)
-    assert driver._scheme is predictor
+def test_constructor_validates_scheme_type(simple_model, chain_file):
+    with pytest.raises(TypeError, match='scheme'):
+        DepletionManager(simple_model, chain_file, [1.0], 1e6,
+                         scheme=42)
 
 
 def test_constructor_accepts_scheme_string(simple_model, chain_file):
-    driver = DepletionDriver(simple_model, chain_file, [1.0], 1e6,
-                              scheme='cecm')
-    assert driver._scheme.name == 'cecm'
+    mgr = DepletionManager(simple_model, chain_file, [1.0], 1e6,
+                           scheme='cecm')
+    assert mgr._scheme.name == 'cecm'
 
 
 def test_constructor_scalar_source_rate(simple_model, chain_file):
-    driver = DepletionDriver(simple_model, chain_file, [1.0, 2.0], 1e6)
-    np.testing.assert_array_equal(driver._source_rates, [1e6, 1e6])
+    mgr = DepletionManager(simple_model, chain_file, [1.0, 2.0], 1e6)
+    np.testing.assert_array_equal(mgr._source_rates, [1e6, 1e6])
 
 
 def test_constructor_timestep_units(simple_model, chain_file):
-    driver = DepletionDriver(simple_model, chain_file, [1.0], 1e6,
-                              timestep_units='d')
-    np.testing.assert_allclose(driver._timesteps_s, [86400.0])
-
-
-# ---------------------------------------------------------------------------
-# Helper method tests (static/classmethod)
-# ---------------------------------------------------------------------------
-
-def test_resolve_density_bos():
-    densities = {BOS: 'bos_data'}
-    assert DepletionDriver._resolve_density(BOS, densities) == 'bos_data'
-
-
-def test_resolve_density_expm_node():
-    node = Expm((MatrixTerm(0.5, Transport(BOS)),), BOS)
-    densities = {node: 'expm_result'}
-    assert DepletionDriver._resolve_density(node, densities) == 'expm_result'
-
-
-def test_resolve_density_missing():
-    with pytest.raises(KeyError):
-        DepletionDriver._resolve_density('missing', {})
-
-
-def test_find_last_expm_simple():
-    t = Transport(BOS)
-    e1 = Expm((MatrixTerm(1.0, t),), BOS)
-    e2 = Expm((MatrixTerm(1.0, t),), e1)
-    assert DepletionDriver._find_last_expm([t, e1, e2]) is e2
-
-
-def test_find_last_expm_in_iterate():
-    t = Transport(BOS)
-    e_outer = Expm((MatrixTerm(1.0, t),), BOS)
-    e_inner = Expm((MatrixTerm(1.0, t),), BOS)
-    iterate = Iterate(n_iterations=3, body=(Transport(PREV_ITER), e_inner))
-    assert DepletionDriver._find_last_expm([t, e_outer, iterate]) is e_inner
-
-
-def test_find_last_expm_none():
-    t = Transport(BOS)
-    assert DepletionDriver._find_last_expm([t]) is None
+    mgr = DepletionManager(simple_model, chain_file, [1.0], 1e6,
+                           timestep_units='d')
+    np.testing.assert_allclose(mgr._timesteps_s, [86400.0])
 
 
 # ---------------------------------------------------------------------------
@@ -156,30 +110,30 @@ def test_find_last_expm_none():
 # ---------------------------------------------------------------------------
 
 def test_transport_schedule_every(simple_model, chain_file):
-    driver = DepletionDriver(simple_model, chain_file, [1.0, 2.0], 1e6,
-                              transport_schedule='every')
-    assert driver._transport_mask == [True, True]
+    mgr = DepletionManager(simple_model, chain_file, [1.0, 2.0], 1e6,
+                           transport_schedule='every')
+    assert mgr._transport_mask == [True, True]
 
 
 def test_transport_schedule_first(simple_model, chain_file):
-    driver = DepletionDriver(simple_model, chain_file, [1.0, 2.0, 3.0], 1e6,
-                              transport_schedule='first')
-    assert driver._transport_mask == [True, False, False]
+    mgr = DepletionManager(simple_model, chain_file, [1.0, 2.0, 3.0], 1e6,
+                           transport_schedule='first')
+    assert mgr._transport_mask == [True, False, False]
 
 
 def test_transport_schedule_bool_list(simple_model, chain_file):
-    driver = DepletionDriver(simple_model, chain_file, [1.0, 2.0, 3.0], 1e6,
-                              transport_schedule=[True, False, True])
-    assert driver._transport_mask == [True, False, True]
+    mgr = DepletionManager(simple_model, chain_file, [1.0, 2.0, 3.0], 1e6,
+                           transport_schedule=[True, False, True])
+    assert mgr._transport_mask == [True, False, True]
 
 
 def test_transport_schedule_length_mismatch(simple_model, chain_file):
     with pytest.raises(ValueError, match='transport_schedule'):
-        DepletionDriver(simple_model, chain_file, [1.0, 2.0], 1e6,
+        DepletionManager(simple_model, chain_file, [1.0, 2.0], 1e6,
                          transport_schedule=[True])
 
 
 def test_transport_schedule_invalid_string(simple_model, chain_file):
     with pytest.raises(ValueError, match='transport_schedule'):
-        DepletionDriver(simple_model, chain_file, [1.0], 1e6,
+        DepletionManager(simple_model, chain_file, [1.0], 1e6,
                          transport_schedule='invalid')
