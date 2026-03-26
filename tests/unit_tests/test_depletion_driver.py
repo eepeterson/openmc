@@ -149,3 +149,37 @@ def test_find_last_expm_in_iterate():
 def test_find_last_expm_none():
     t = Transport(BOS)
     assert DepletionDriver._find_last_expm([t]) is None
+
+
+# ---------------------------------------------------------------------------
+# transport_schedule tests
+# ---------------------------------------------------------------------------
+
+def test_transport_schedule_every(simple_model, chain_file):
+    driver = DepletionDriver(simple_model, chain_file, [1.0, 2.0], 1e6,
+                              transport_schedule='every')
+    assert driver._transport_mask == [True, True]
+
+
+def test_transport_schedule_first(simple_model, chain_file):
+    driver = DepletionDriver(simple_model, chain_file, [1.0, 2.0, 3.0], 1e6,
+                              transport_schedule='first')
+    assert driver._transport_mask == [True, False, False]
+
+
+def test_transport_schedule_bool_list(simple_model, chain_file):
+    driver = DepletionDriver(simple_model, chain_file, [1.0, 2.0, 3.0], 1e6,
+                              transport_schedule=[True, False, True])
+    assert driver._transport_mask == [True, False, True]
+
+
+def test_transport_schedule_length_mismatch(simple_model, chain_file):
+    with pytest.raises(ValueError, match='transport_schedule'):
+        DepletionDriver(simple_model, chain_file, [1.0, 2.0], 1e6,
+                         transport_schedule=[True])
+
+
+def test_transport_schedule_invalid_string(simple_model, chain_file):
+    with pytest.raises(ValueError, match='transport_schedule'):
+        DepletionDriver(simple_model, chain_file, [1.0], 1e6,
+                         transport_schedule='invalid')

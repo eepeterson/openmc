@@ -88,6 +88,10 @@ class DepletionDriver:
     output_path : str or Path, optional
         HDF5 file path for depletion results.  Default
         ``'depletion_results.h5'``.
+    transport_schedule : str or iterable of bool, optional
+        Controls which timesteps run transport.  ``'every'`` (default)
+        runs transport every step; ``'first'`` runs only on step 0;
+        an iterable of bool gives per-step control.
 
     """
 
@@ -104,6 +108,7 @@ class DepletionDriver:
         normalization_mode: str = 'fission-q',
         solver_order: int = 48,
         output_path: str | Path = 'depletion_results.h5',
+        transport_schedule: str | Iterable[bool] = 'every',
     ):
         # --- Validate inputs ---
         cv.check_type('model', model, openmc.Model)
@@ -170,6 +175,23 @@ class DepletionDriver:
                 if rx.type == 'fission':
                     self._fission_q[i] = rx.Q  # eV per fission
                     break
+
+        # Transport schedule → per-step bool mask
+        if isinstance(transport_schedule, str):
+            cv.check_value('transport_schedule', transport_schedule,
+                            ('every', 'first'))
+            if transport_schedule == 'every':
+                self._transport_mask = [True] * n_steps
+            else:  # 'first'
+                self._transport_mask = (
+                    [True] + [False] * (n_steps - 1))
+        else:
+            self._transport_mask = [bool(x) for x in transport_schedule]
+            if len(self._transport_mask) != n_steps:
+                raise ValueError(
+                    f"Length of transport_schedule "
+                    f"({len(self._transport_mask)}) does not match "
+                    f"number of timesteps ({n_steps}).")
 
         # These are populated in _initialize()
         self._burn_mat_ids = None  # list of str (sorted by int(id))
@@ -721,7 +743,7 @@ class DepletionDriver:
 
             for i, (dt, source_rate) in enumerate(
                     zip(self._timesteps_s, self._source_rates)):
-                self._should_run_transport = True
+                self._should_run_transport = self._transport_mask[i]
 
                 scheme = self._scheme
                 if i == 0 and scheme.fallback is not None:
