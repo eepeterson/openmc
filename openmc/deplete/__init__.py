@@ -18,7 +18,7 @@ from .results import *
 from .integrators import *
 from .transfer_rates import *
 from .r2s import *
-from .driver import *
+from .depletion_manager import *
 from . import abc
 from . import cram
 from . import helpers

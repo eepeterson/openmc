@@ -16,7 +16,7 @@ import pytest
 import openmc
 import openmc.deplete
 from openmc.deplete import Results
-from openmc.deplete.driver import DepletionManager
+from openmc.deplete.depletion_manager import DepletionManager
 
 # Simple chain files shipped with the tests
 CHAIN_SIMPLE = Path(__file__).parents[1] / 'chain_simple.xml'

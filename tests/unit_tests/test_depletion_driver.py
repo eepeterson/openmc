@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import openmc
-from openmc.deplete.driver import DepletionManager, _TIMESTEP_UNITS
+from openmc.deplete.depletion_manager import DepletionManager, _TIMESTEP_UNITS
 from openmc.deplete.integration_schemes import SCHEMES
 
 
@@ -91,7 +91,7 @@ def test_constructor_validates_scheme_type(simple_model, chain_file):
 def test_constructor_accepts_scheme_string(simple_model, chain_file):
     mgr = DepletionManager(simple_model, chain_file, [1.0], 1e6,
                            scheme='cecm')
-    assert mgr._scheme.name == 'cecm'
+    assert mgr._scheme_name == 'cecm'
 
 
 def test_constructor_scalar_source_rate(simple_model, chain_file):
