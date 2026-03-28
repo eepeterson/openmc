@@ -353,3 +353,120 @@ def test_multistep_cecm_physics(run_in_tmpdir):
     for i in range(len(k_vals)):
         assert 0.5 < k_vals[i, 0] < 2.5, \
             f"Step {i}: k_eff={k_vals[i,0]:.4f} out of range"
+
+
+# ------------------------------------------------------------------
+# Test 6: Restart (append mode) — decay-only, exact comparison
+# ------------------------------------------------------------------
+
+def test_restart_append_decay(run_in_tmpdir):
+    """Run 2 steps, restart with 2 more, verify vs single 4-step run."""
+    if not CHAIN_DECAY.exists():
+        pytest.skip("chain_simple_decay.xml not found")
+
+    dt = [500.0, 600.0, 700.0, 800.0]  # seconds
+
+    # --- Reference: single 4-step run ---
+    ref_dir = Path('ref')
+    ref_dir.mkdir()
+    os.chdir(ref_dir)
+    model_ref = _make_decay_model()
+    mgr_ref = DepletionManager(
+        model_ref, str(CHAIN_DECAY), dt, 0.0,
+        source_rate_type='power', scheme='predictor')
+    res_ref = mgr_ref.run()
+    os.chdir('..')
+
+    # --- First run: 2 steps ---
+    run_dir = Path('restart_run')
+    run_dir.mkdir()
+    os.chdir(run_dir)
+    model1 = _make_decay_model()
+    mgr1 = DepletionManager(
+        model1, str(CHAIN_DECAY), dt[:2], 0.0,
+        source_rate_type='power', scheme='predictor')
+    mgr1.run()
+
+    # --- Restart: append 2 more steps ---
+    model2 = _make_decay_model()
+    mgr2 = DepletionManager(
+        model2, str(CHAIN_DECAY), dt[2:], 0.0,
+        source_rate_type='power', scheme='predictor',
+        prev_results='depletion_results.h5')
+    res_rst = mgr2.run()
+    os.chdir('..')
+
+    mat_ref = list(res_ref[0].index_mat.keys())[0]
+    mat_rst = list(res_rst[0].index_mat.keys())[0]
+
+    # Verify all 4 EOS compositions match between reference and restart
+    for nuc in ['Xe135_m1', 'Xe135', 'Cs135_m1', 'Cs135']:
+        _, conc_ref = res_ref.get_atoms(mat_ref, nuc)
+        _, conc_rst = res_rst.get_atoms(mat_rst, nuc)
+        for step in range(4):
+            assert conc_rst[step] == pytest.approx(
+                conc_ref[step], rel=1e-10), \
+                f"Step {step} {nuc} mismatch: " \
+                f"restart={conc_rst[step]:.6e} ref={conc_ref[step]:.6e}"
+
+    # Verify time grid is consistent
+    times_ref = res_ref.get_times(time_units='s')
+    times_rst = res_rst.get_times(time_units='s')
+    np.testing.assert_allclose(times_ref, times_rst, rtol=1e-12)
+
+
+# ------------------------------------------------------------------
+# Test 7: Restart (auto-continue) — resubmit same script
+# ------------------------------------------------------------------
+
+def test_restart_auto_continue_decay(run_in_tmpdir):
+    """Run 2 steps, restart with all 4, verify completed steps skipped."""
+    if not CHAIN_DECAY.exists():
+        pytest.skip("chain_simple_decay.xml not found")
+
+    dt = [500.0, 600.0, 700.0, 800.0]
+
+    # --- Reference ---
+    ref_dir = Path('ref')
+    ref_dir.mkdir()
+    os.chdir(ref_dir)
+    model_ref = _make_decay_model()
+    mgr_ref = DepletionManager(
+        model_ref, str(CHAIN_DECAY), dt, 0.0,
+        source_rate_type='power', scheme='predictor')
+    res_ref = mgr_ref.run()
+    os.chdir('..')
+
+    # --- First run: 2 steps ---
+    ac_dir = Path('ac_run')
+    ac_dir.mkdir()
+    os.chdir(ac_dir)
+    model1 = _make_decay_model()
+    mgr1 = DepletionManager(
+        model1, str(CHAIN_DECAY), dt[:2], 0.0,
+        source_rate_type='power', scheme='predictor')
+    mgr1.run()
+
+    # --- Auto-continue: provide all 4 timesteps + prev_results ---
+    model2 = _make_decay_model()
+    mgr2 = DepletionManager(
+        model2, str(CHAIN_DECAY), dt, 0.0,
+        source_rate_type='power', scheme='predictor',
+        prev_results='depletion_results.h5')
+    res_ac = mgr2.run()
+    os.chdir('..')
+
+    mat_ref = list(res_ref[0].index_mat.keys())[0]
+    mat_ac = list(res_ac[0].index_mat.keys())[0]
+
+    for nuc in ['Xe135_m1', 'Xe135', 'Cs135_m1', 'Cs135']:
+        _, conc_ref = res_ref.get_atoms(mat_ref, nuc)
+        _, conc_ac = res_ac.get_atoms(mat_ac, nuc)
+        for step in range(4):
+            assert conc_ac[step] == pytest.approx(
+                conc_ref[step], rel=1e-10), \
+                f"Step {step} {nuc} mismatch"
+
+    times_ref = res_ref.get_times(time_units='s')
+    times_ac = res_ac.get_times(time_units='s')
+    np.testing.assert_allclose(times_ref, times_ac, rtol=1e-12)

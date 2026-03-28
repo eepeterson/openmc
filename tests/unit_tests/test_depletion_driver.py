@@ -137,3 +137,19 @@ def test_transport_schedule_invalid_string(simple_model, chain_file):
     with pytest.raises(ValueError, match='transport_schedule'):
         DepletionManager(simple_model, chain_file, [1.0], 1e6,
                          transport_schedule='invalid')
+
+
+# ---------------------------------------------------------------------------
+# prev_results validation tests
+# ---------------------------------------------------------------------------
+
+def test_prev_results_invalid_type(simple_model, chain_file):
+    with pytest.raises(TypeError, match='prev_results'):
+        DepletionManager(simple_model, chain_file, [1.0], 1e6,
+                         prev_results=42)
+
+
+def test_prev_results_missing_file(simple_model, chain_file):
+    with pytest.raises(Exception):
+        DepletionManager(simple_model, chain_file, [1.0], 1e6,
+                         prev_results='/nonexistent/results.h5')
