@@ -83,6 +83,58 @@ public:
   vector<double> solve(const CSCMatrix& A, const vector<double>& n0,
     double dt, const vector<int>& perm);
 
+  //! Compute the matrix exponential of a pure-decay matrix.
+  //!
+  //! Exploits topological permutation to lower-triangular form.
+  //! Each CRAM pole requires only forward substitution, and the IPF
+  //! iteration preserves sparsity across all poles: column j of exp(A*dt)
+  //! has nonzeros only at positions reachable from j in the decay DAG
+  //! (the transitive closure). For typical decay chains, this yields
+  //! dramatically sparser results (~0.5% vs ~25% for full burnup) and
+  //! a proportional speedup.
+  //!
+  //! \param A        Sparse decay matrix (n x n)
+  //! \param dt       Time interval [s]
+  //! \param drop_tol Entries with |value| < drop_tol are dropped (default 0)
+  //! \param perm     Topological permutation: perm[new_idx] = old_idx.
+  //!                 Must reorder the decay matrix into lower-triangular form.
+  //! \return         Sparse matrix exponential exp(A*dt) as CSCMatrix
+  CSCMatrix expm(const CSCMatrix& A, double dt, double drop_tol,
+    const vector<int>& perm);
+
+  //! Compute matrix exponential with precomputed reachability.
+  //!
+  //! Same as expm() but skips the internal reachability computation,
+  //! using the provided flat arrays instead. This enables the caller to
+  //! compute reachability once per chain and reuse it across time steps.
+  //!
+  //! \param A              Sparse decay matrix (n x n)
+  //! \param dt             Time interval [s]
+  //! \param drop_tol       Drop threshold for output entries
+  //! \param perm           Topological permutation: perm[new_idx] = old_idx
+  //! \param reach_indptr   Precomputed reach column pointers [n+1]
+  //! \param reach_indices  Precomputed reach row indices
+  //! \return               Sparse matrix exponential exp(A*dt) as CSCMatrix
+  CSCMatrix expm(const CSCMatrix& A, double dt, double drop_tol,
+    const vector<int>& perm, const int* reach_indptr,
+    const int* reach_indices);
+
+  //! Compute structural reachability for a pure-decay matrix.
+  //!
+  //! For each column j (in permuted space), computes the set of row indices
+  //! reachable via transitive closure of the decay DAG. This determines the
+  //! nonzero pattern of exp(A*dt) and is invariant for a given chain topology.
+  //! Result is in flat CSC-like format: reach_indptr[j]..reach_indptr[j+1]
+  //! indexes into reach_indices.
+  //!
+  //! \param A              Sparse decay matrix
+  //! \param perm           Topological permutation: perm[new_idx] = old_idx
+  //! \param reach_indptr   Output column pointers [n+1]
+  //! \param reach_indices  Output row indices [total_reach]
+  static void compute_reachability(const CSCMatrix& A,
+    const vector<int>& perm, vector<int>& reach_indptr,
+    vector<int>& reach_indices);
+
 private:
   // --- CRAM coefficients ---
   int n_poles_;                        //!< Number of poles (k/2)
@@ -140,6 +192,7 @@ private:
   //! \param x  Solution vector (complex-valued)
   void triangular_solve(
     const vector<double>& b, vector<std::complex<double>>& x) const;
+
 };
 
 } // namespace openmc

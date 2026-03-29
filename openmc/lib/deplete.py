@@ -91,6 +91,184 @@ def cram_solve_batch(matrices, n0_list, dt, order=48, perm=None):
         np.concatenate([[0], offsets[:-1]]), offsets)]
 
 
+# --- CRAM matrix exponential ---
+
+_dll.openmc_decay_reachability.restype = c_int
+_dll.openmc_decay_reachability.errcheck = _error_handler
+_dll.openmc_decay_reachability.argtypes = [
+    c_int,          # n
+    _array_1d_int,  # indptr
+    _array_1d_int,  # indices
+    _array_1d_dbl,  # data
+    c_void_p,       # perm
+    c_void_p,       # reach_indptr (nullable)
+    c_void_p,       # reach_indices (nullable)
+    POINTER(c_int), # total_reach
+]
+
+_dll.openmc_cram_expm.restype = c_int
+_dll.openmc_cram_expm.errcheck = _error_handler
+_dll.openmc_cram_expm.argtypes = [
+    c_int,          # n
+    _array_1d_int,  # indptr
+    _array_1d_int,  # indices
+    _array_1d_dbl,  # data
+    c_double,       # dt
+    c_int,          # order
+    c_double,       # drop_tol
+    c_void_p,       # perm
+    c_void_p,       # reach_indptr (nullable)
+    c_void_p,       # reach_indices (nullable)
+    c_void_p,       # out_indptr
+    c_void_p,       # out_indices (nullable for query)
+    c_void_p,       # out_data (nullable for query)
+    POINTER(c_int), # out_nnz
+]
+
+
+def compute_reachability(matrix, perm):
+    """Compute structural reachability for a decay matrix.
+
+    For each column j (in permuted space), computes the set of row indices
+    reachable via transitive closure of the decay DAG. This determines the
+    nonzero pattern of exp(A*dt) and is invariant for a given chain topology.
+    The result can be passed to :func:`cram_expm` to skip recomputing
+    reachability on every call.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse.csc_array or csc_matrix
+        Sparse decay matrix A in CSC format.
+    perm : numpy.ndarray
+        Topological permutation vector: ``perm[new_idx] = old_idx``.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        ``(reach_indptr, reach_indices)`` — flat CSC-like arrays where
+        ``reach_indptr[j]..reach_indptr[j+1]`` indexes into
+        ``reach_indices`` for column j's reachable rows.
+
+    """
+    from scipy.sparse import csc_array
+
+    matrix = csc_array(matrix)
+    n = matrix.shape[0]
+    indptr = np.ascontiguousarray(matrix.indptr, dtype=np.int32)
+    indices = np.ascontiguousarray(matrix.indices, dtype=np.int32)
+    data = np.ascontiguousarray(matrix.data, dtype=np.float64)
+    perm_arr = np.ascontiguousarray(perm, dtype=np.int32)
+    perm_ptr = perm_arr.ctypes.data
+
+    # Query call: get total_reach and reach_indptr
+    reach_indptr = np.empty(n + 1, dtype=np.int32)
+    total_reach = c_int(0)
+    _dll.openmc_decay_reachability(
+        n, indptr, indices, data, perm_ptr,
+        reach_indptr.ctypes.data, None, byref(total_reach))
+
+    # Fill call: get reach_indices
+    reach_indices = np.empty(total_reach.value, dtype=np.int32)
+    _dll.openmc_decay_reachability(
+        n, indptr, indices, data, perm_ptr,
+        reach_indptr.ctypes.data, reach_indices.ctypes.data,
+        byref(total_reach))
+
+    return reach_indptr, reach_indices
+
+
+def cram_expm(matrix, dt, perm, order=48, drop_tol=0.0, reach=None):
+    """Compute the matrix exponential exp(A*dt) of a decay matrix using CRAM.
+
+    Uses the decay-optimized solver which exploits topological permutation
+    to lower-triangular form for forward substitution with DAG sparsity.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse.csc_array or csc_matrix
+        Sparse decay matrix A in CSC format.
+    dt : float
+        Time step in seconds.
+    perm : numpy.ndarray
+        Topological permutation vector: ``perm[new_idx] = old_idx``.
+        Must reorder the decay matrix into lower-triangular form.
+    order : int
+        CRAM approximation order (16 or 48).
+    drop_tol : float
+        Drop entries with absolute value below this threshold.
+    reach : tuple of numpy.ndarray, optional
+        Precomputed reachability from :func:`compute_reachability`. When
+        provided, skips the internal reachability computation and enables
+        a single C++ call instead of two (the output nnz is known upfront).
+
+    Returns
+    -------
+    scipy.sparse.csr_array
+        Sparse matrix exponential exp(A*dt) in CSR format.
+
+    """
+    from scipy.sparse import csc_array, csr_array
+
+    if order not in (16, 48):
+        raise ValueError(f"CRAM order must be 16 or 48, got {order}")
+
+    matrix = csc_array(matrix)
+    n = matrix.shape[0]
+    indptr = np.ascontiguousarray(matrix.indptr, dtype=np.int32)
+    indices = np.ascontiguousarray(matrix.indices, dtype=np.int32)
+    data = np.ascontiguousarray(matrix.data, dtype=np.float64)
+
+    perm_arr = np.ascontiguousarray(perm, dtype=np.int32)
+    perm_ptr = perm_arr.ctypes.data
+
+    if reach is not None:
+        reach_indptr, reach_indices = reach
+        reach_indptr = np.ascontiguousarray(reach_indptr, dtype=np.int32)
+        reach_indices = np.ascontiguousarray(reach_indices, dtype=np.int32)
+
+        # Pre-allocate output: max nnz = n + total_reach
+        max_nnz = n + len(reach_indices)
+        out_indptr = np.empty(n + 1, dtype=np.int32)
+        out_indices = np.empty(max_nnz, dtype=np.int32)
+        out_data = np.empty(max_nnz, dtype=np.float64)
+        out_nnz = c_int(0)
+
+        # Single C++ call with precomputed reachability
+        _dll.openmc_cram_expm(
+            n, indptr, indices, data, dt, order, drop_tol,
+            perm_ptr, reach_indptr.ctypes.data,
+            reach_indices.ctypes.data,
+            out_indptr.ctypes.data, out_indices.ctypes.data,
+            out_data.ctypes.data, byref(out_nnz))
+
+        nnz = out_nnz.value
+        result_csc = csc_array(
+            (out_data[:nnz], out_indices[:nnz], out_indptr), shape=(n, n))
+        return csr_array(result_csc)
+
+    # No precomputed reach — two-call pattern
+    out_indptr = np.empty(n + 1, dtype=np.int32)
+    out_nnz = c_int(0)
+    _dll.openmc_cram_expm(
+        n, indptr, indices, data, dt, order, drop_tol,
+        perm_ptr, None, None,
+        out_indptr.ctypes.data, None, None, byref(out_nnz))
+
+    nnz = out_nnz.value
+
+    out_indices = np.empty(nnz, dtype=np.int32)
+    out_data = np.empty(nnz, dtype=np.float64)
+    _dll.openmc_cram_expm(
+        n, indptr, indices, data, dt, order, drop_tol,
+        perm_ptr, None, None,
+        out_indptr.ctypes.data, out_indices.ctypes.data,
+        out_data.ctypes.data, byref(out_nnz))
+
+    # Build CSC matrix, convert to CSR for optimal SpMV
+    result_csc = csc_array((out_data, out_indices, out_indptr), shape=(n, n))
+    return csr_array(result_csc)
+
+
 # --- Chain loading ---
 
 _dll.openmc_load_depletion_chain.restype = c_int

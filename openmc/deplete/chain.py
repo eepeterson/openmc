@@ -689,7 +689,7 @@ class Chain:
                             branch_val = branching_ratio * decay_constant
 
                             if branch_val != 0.0:
-                                if target is not None:
+                                if target is not None and 'sf' not in decay_type:
                                     k = self.nuclide_dict[target]
                                     setval(k, i, branch_val)
 
@@ -772,11 +772,12 @@ class Chain:
 
                     # Determine light nuclide production, e.g., (n,d) should
                     # produce H2
-                    light_nucs = REACTIONS[r_type].secondaries
-                    for light_nuc in light_nucs:
-                        k = self.nuclide_dict.get(light_nuc)
-                        if k is not None:
-                            setval(k, i, path_rate * br)
+                    if path_rate != 0.0:
+                        light_nucs = REACTIONS[r_type].secondaries
+                        for light_nuc in light_nucs:
+                            k = self.nuclide_dict.get(light_nuc)
+                            if k is not None:
+                                setval(k, i, path_rate * br)
 
                 else:
                     for product, y in fission_yields[nuc.name].items():
