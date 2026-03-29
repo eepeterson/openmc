@@ -419,28 +419,13 @@ void IPFCramSolver::triangular_solve(
 // Solves LUx = e_j using structural reachability in the L-factor graph.
 // The reach vector contains the sorted column indices reachable from j
 // in the directed graph of L (edge k->i iff L[i,k] != 0 structurally).
+
 //==============================================================================
-// Matrix exponential via IPF CRAM — decay-only variant
-//
-// Exploits topological permutation to lower-triangular form for pure-decay
-// matrices. Forward substitution only (no U factor). Sparsity is preserved
-// across all IPF poles because the nonzero pattern of each column is the
-// DAG transitive closure, which is invariant under forward substitution.
-//
-// Algorithm:
-//   1. Permute A into lower-triangular form, extract diagonal + off-diag
-//   2. Use precomputed reach[j] (transitive closure, flat CSC-like arrays)
-//   3. Store M in compressed form: only reach[j] entries per column j
-//   4. For each pole k:
-//      - For each column j: sparse forward sub over {j} ∪ reach[j]
-//      - Accumulate F_k update into compressed M
-//   5. Scale by alpha0, unpermute, build sparse CSC
+// Scatter CSC matrix into permuted lower-triangular form
 //==============================================================================
 
-CSCMatrix IPFCramSolver::expm(
-  const CSCMatrix& A, double dt, double drop_tol,
-  const vector<int>& perm, const int* reach_indptr,
-  const int* reach_indices)
+void IPFCramSolver::scatter_to_lower_triangular(
+  const CSCMatrix& A, const vector<int>& perm)
 {
   int n = A.n();
   const auto& indptr = A.indptr();
@@ -453,9 +438,8 @@ CSCMatrix IPFCramSolver::expm(
     inv_perm[perm[i]] = i;
   }
 
-  // Scatter A into permuted lower-triangular structure.
+  // First pass: extract diagonal, count off-diagonal entries per column
   diag_.assign(n, 0.0);
-
   vector<int> col_counts(n, 0);
   for (int old_col = 0; old_col < n; ++old_col) {
     int new_col = inv_perm[old_col];
@@ -469,12 +453,14 @@ CSCMatrix IPFCramSolver::expm(
     }
   }
 
+  // Build column pointers
   lt_indptr_.resize(n + 1);
   lt_indptr_[0] = 0;
   for (int j = 0; j < n; ++j) {
     lt_indptr_[j + 1] = lt_indptr_[j] + col_counts[j];
   }
 
+  // Second pass: fill row indices and values
   int lt_nnz = lt_indptr_[n];
   lt_rowidx_.resize(lt_nnz);
   lt_data_.resize(lt_nnz);
@@ -518,6 +504,35 @@ CSCMatrix IPFCramSolver::expm(
       lt_data_[start + i] = tmp_val[i];
     }
   }
+}
+
+//==============================================================================
+// Matrix exponential via IPF CRAM — decay-only variant
+//
+// Exploits topological permutation to lower-triangular form for pure-decay
+// matrices. Forward substitution only (no U factor). Sparsity is preserved
+// across all IPF poles because the nonzero pattern of each column is the
+// DAG transitive closure, which is invariant under forward substitution.
+//
+// Algorithm:
+//   1. Permute A into lower-triangular form, extract diagonal + off-diag
+//   2. Use precomputed reach[j] (transitive closure, flat CSC-like arrays)
+//   3. Store M in compressed form: only reach[j] entries per column j
+//   4. For each pole k:
+//      - For each column j: sparse forward sub over {j} ∪ reach[j]
+//      - Accumulate F_k update into compressed M
+//   5. Scale by alpha0, unpermute, build sparse CSC
+//==============================================================================
+
+CSCMatrix IPFCramSolver::expm(
+  const CSCMatrix& A, double dt, double drop_tol,
+  const vector<int>& perm, const int* reach_indptr,
+  const int* reach_indices)
+{
+  int n = A.n();
+
+  // Scatter A into permuted lower-triangular structure
+  scatter_to_lower_triangular(A, perm);
 
   // Compressed M column offsets derived from precomputed reach:
   // col_offset(j) = j + reach_indptr[j], since each column stores
@@ -710,85 +725,9 @@ vector<double> IPFCramSolver::solve(
   double dt, const vector<int>& perm)
 {
   int n = A.n();
-  const auto& indptr = A.indptr();
-  const auto& indices = A.indices();
-  const auto& data = A.data();
 
-  // Build inverse permutation
-  vector<int> inv_perm(n);
-  for (int i = 0; i < n; ++i) {
-    inv_perm[perm[i]] = i;
-  }
-
-  // Scatter A into permuted lower-triangular structure.
-  // After permutation, off-diagonal entries satisfy new_row > new_col.
-  diag_.assign(n, 0.0);
-
-  // First pass: count off-diagonal entries per permuted column
-  vector<int> col_counts(n, 0);
-  for (int old_col = 0; old_col < n; ++old_col) {
-    int new_col = inv_perm[old_col];
-    for (int p = indptr[old_col]; p < indptr[old_col + 1]; ++p) {
-      int new_row = inv_perm[indices[p]];
-      if (new_row == new_col) {
-        diag_[new_col] = data[p];
-      } else {
-        ++col_counts[new_col];
-      }
-    }
-  }
-
-  // Build column pointers
-  lt_indptr_.resize(n + 1);
-  lt_indptr_[0] = 0;
-  for (int j = 0; j < n; ++j) {
-    lt_indptr_[j + 1] = lt_indptr_[j] + col_counts[j];
-  }
-
-  // Second pass: fill row indices and values
-  int lt_nnz = lt_indptr_[n];
-  lt_rowidx_.resize(lt_nnz);
-  lt_data_.resize(lt_nnz);
-  vector<int> col_pos(n, 0);
-
-  for (int old_col = 0; old_col < n; ++old_col) {
-    int new_col = inv_perm[old_col];
-    for (int p = indptr[old_col]; p < indptr[old_col + 1]; ++p) {
-      int new_row = inv_perm[indices[p]];
-      if (new_row != new_col) {
-        int pos = lt_indptr_[new_col] + col_pos[new_col]++;
-        lt_rowidx_[pos] = new_row;
-        lt_data_[pos] = data[p];
-      }
-    }
-  }
-
-  // Sort row indices within each column
-  for (int j = 0; j < n; ++j) {
-    int start = lt_indptr_[j];
-    int end = lt_indptr_[j + 1];
-    int len = end - start;
-    if (len <= 1)
-      continue;
-
-    vector<int> order(len);
-    for (int i = 0; i < len; ++i)
-      order[i] = i;
-    std::sort(order.begin(), order.end(), [&](int a, int b) {
-      return lt_rowidx_[start + a] < lt_rowidx_[start + b];
-    });
-
-    vector<int> tmp_idx(len);
-    vector<double> tmp_val(len);
-    for (int i = 0; i < len; ++i) {
-      tmp_idx[i] = lt_rowidx_[start + order[i]];
-      tmp_val[i] = lt_data_[start + order[i]];
-    }
-    for (int i = 0; i < len; ++i) {
-      lt_rowidx_[start + i] = tmp_idx[i];
-      lt_data_[start + i] = tmp_val[i];
-    }
-  }
+  // Scatter A into permuted lower-triangular structure
+  scatter_to_lower_triangular(A, perm);
 
   // Permute n0 into topological order
   vector<double> y(n);
@@ -921,46 +860,6 @@ extern "C" int openmc_cram_solve_batch(int n_materials, const int* dims,
       set_errmsg(err_msg);
       return err_code;
     }
-  } catch (const std::exception& e) {
-    set_errmsg(e.what());
-    return OPENMC_E_UNASSIGNED;
-  }
-  return 0;
-}
-
-extern "C" int openmc_cram_solve(int n, const int* indptr,
-  const int* indices, const double* data, const double* n0, double dt,
-  int order, const int* perm, double* result)
-{
-  try {
-    if (order != 16 && order != 48) {
-      set_errmsg(fmt::format(
-        "CRAM order must be 16 or 48, got {}", order));
-      return OPENMC_E_INVALID_ARGUMENT;
-    }
-
-    auto cram_order = (order == 16) ? IPFCramSolver::Order::cram16
-                                    : IPFCramSolver::Order::cram48;
-    IPFCramSolver solver(cram_order);
-
-    // Construct CSCMatrix from raw arrays (copies into solver-owned storage)
-    vector<int> ip(indptr, indptr + n + 1);
-    vector<int> ix(indices, indices + indptr[n]);
-    vector<double> d(data, data + indptr[n]);
-    CSCPattern pattern(n, std::move(ip), std::move(ix));
-    CSCMatrix A(std::move(pattern), std::move(d));
-
-    vector<double> n0_vec(n0, n0 + n);
-    vector<double> y;
-
-    if (perm != nullptr) {
-      vector<int> perm_vec(perm, perm + n);
-      y = solver.solve(A, n0_vec, dt, perm_vec);
-    } else {
-      y = solver.solve(A, n0_vec, dt);
-    }
-
-    std::copy(y.begin(), y.end(), result);
   } catch (const std::exception& e) {
     set_errmsg(e.what());
     return OPENMC_E_UNASSIGNED;

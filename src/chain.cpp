@@ -396,7 +396,10 @@ void DepletionChain::build_decay_matrix()
         if (branch_val == 0.0)
           continue;
 
-        if (!dm.target.empty()) {
+        // Skip spontaneous fission targets — sf products are handled
+        // through fission yield data, not as direct decay targets
+        if (!dm.target.empty() &&
+            dm.type.find("sf") == std::string::npos) {
           int k = nuclide_index(dm.target);
           if (k >= 0) {
             rows.push_back(k);
@@ -599,135 +602,6 @@ extern "C" int openmc_load_depletion_chain(const char* filename)
     data::depletion_chain = make_unique<DepletionChain>();
     data::depletion_chain->load_xml(filename);
     data::chain_nuclide_map = data::depletion_chain->nuclide_map();
-  } catch (const std::exception& e) {
-    set_errmsg(e.what());
-    return OPENMC_E_UNASSIGNED;
-  }
-  return 0;
-}
-
-extern "C" int openmc_chain_form_matrix(
-  const double* rates, int n_nucs_with_rates, int n_reactions,
-  const int* nuc_chain_indices,
-  int n_fission_parents,
-  const int* fy_parent_indices,
-  const int* fy_product_indices,
-  const double* fy_yields,
-  const int* fy_products_per_parent,
-  int* out_indptr, int* out_indices, double* out_data,
-  int* out_nnz, int* out_n)
-{
-  using namespace openmc;
-  try {
-    if (!data::depletion_chain) {
-      set_errmsg("Depletion chain not loaded. Call openmc_load_depletion_chain "
-                 "first.");
-      return OPENMC_E_UNASSIGNED;
-    }
-
-    const auto& chain = *data::depletion_chain;
-
-    // Build fission yields map if provided
-    std::unordered_map<int, std::unordered_map<int, double>> fy_map;
-    if (n_fission_parents > 0 && fy_parent_indices && fy_product_indices &&
-        fy_yields && fy_products_per_parent) {
-      int offset = 0;
-      for (int p = 0; p < n_fission_parents; ++p) {
-        int parent_idx = fy_parent_indices[p];
-        int n_prods = fy_products_per_parent[p];
-        std::unordered_map<int, double> prod_map;
-        for (int j = 0; j < n_prods; ++j) {
-          prod_map[fy_product_indices[offset + j]] = fy_yields[offset + j];
-        }
-        fy_map[parent_idx] = std::move(prod_map);
-        offset += n_prods;
-      }
-    }
-
-    // Form the matrix
-    CSCMatrix mat = chain.form_matrix(
-      rates, n_nucs_with_rates, n_reactions, nuc_chain_indices, fy_map);
-
-    // Populate output
-    *out_n = mat.n();
-    *out_nnz = mat.nnz();
-
-    // If out_indices is null, caller is just querying sizes
-    if (out_indices == nullptr || out_data == nullptr) {
-      return 0;
-    }
-
-    // Copy CSC data to output arrays
-    const auto& indptr = mat.indptr();
-    const auto& indices = mat.indices();
-    const auto& data = mat.data();
-    std::copy(indptr.begin(), indptr.end(), out_indptr);
-    std::copy(indices.begin(), indices.end(), out_indices);
-    std::copy(data.begin(), data.end(), out_data);
-
-  } catch (const std::exception& e) {
-    set_errmsg(e.what());
-    return OPENMC_E_UNASSIGNED;
-  }
-  return 0;
-}
-
-extern "C" int openmc_chain_form_rxn_matrix(
-  const double* rates, int n_nucs_with_rates, int n_reactions,
-  const int* nuc_chain_indices,
-  int n_fission_parents,
-  const int* fy_parent_indices,
-  const int* fy_product_indices,
-  const double* fy_yields,
-  const int* fy_products_per_parent,
-  int* out_indptr, int* out_indices, double* out_data,
-  int* out_nnz, int* out_n)
-{
-  using namespace openmc;
-  try {
-    if (!data::depletion_chain) {
-      set_errmsg("Depletion chain not loaded. Call openmc_load_depletion_chain "
-                 "first.");
-      return OPENMC_E_UNASSIGNED;
-    }
-
-    const auto& chain = *data::depletion_chain;
-
-    // Build fission yields map if provided
-    std::unordered_map<int, std::unordered_map<int, double>> fy_map;
-    if (n_fission_parents > 0 && fy_parent_indices && fy_product_indices &&
-        fy_yields && fy_products_per_parent) {
-      int offset = 0;
-      for (int p = 0; p < n_fission_parents; ++p) {
-        int parent_idx = fy_parent_indices[p];
-        int n_prods = fy_products_per_parent[p];
-        std::unordered_map<int, double> prod_map;
-        for (int j = 0; j < n_prods; ++j) {
-          prod_map[fy_product_indices[offset + j]] = fy_yields[offset + j];
-        }
-        fy_map[parent_idx] = std::move(prod_map);
-        offset += n_prods;
-      }
-    }
-
-    // Form the reaction-rate-only matrix (no decay)
-    CSCMatrix mat = chain.form_rxn_matrix(
-      rates, n_nucs_with_rates, n_reactions, nuc_chain_indices, fy_map);
-
-    // Populate output
-    *out_n = mat.n();
-    *out_nnz = mat.nnz();
-
-    // If out_indices is null, caller is just querying sizes
-    if (out_indices == nullptr || out_data == nullptr) {
-      return 0;
-    }
-
-    // Copy CSC data to output arrays
-    std::copy(mat.indptr().begin(), mat.indptr().end(), out_indptr);
-    std::copy(mat.indices().begin(), mat.indices().end(), out_indices);
-    std::copy(mat.data().begin(), mat.data().end(), out_data);
-
   } catch (const std::exception& e) {
     set_errmsg(e.what());
     return OPENMC_E_UNASSIGNED;

@@ -37,9 +37,6 @@ if TYPE_CHECKING:
 
 __all__ = ['DepletionManager']
 
-# eV per Joule
-EV_PER_JOULE = 1.602176634e-19
-
 # Unit multipliers to convert timesteps to seconds
 _TIMESTEP_UNITS = {
     's': 1.0,

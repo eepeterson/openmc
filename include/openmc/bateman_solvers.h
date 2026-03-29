@@ -171,6 +171,19 @@ private:
   // --- Shared workspace ---
   vector<std::complex<double>> x_; //!< Complex solve result [n]
 
+  // --- Decay solver private methods ---
+
+  //! Scatter a CSC matrix into permuted lower-triangular form.
+  //!
+  //! Populates diag_, lt_indptr_, lt_rowidx_, lt_data_ from the input
+  //! matrix using the given topological permutation. Row indices within
+  //! each column are sorted in ascending order after scatter.
+  //!
+  //! \param A    Sparse matrix (n x n)
+  //! \param perm Topological permutation: perm[new_idx] = old_idx
+  void scatter_to_lower_triangular(
+    const CSCMatrix& A, const vector<int>& perm);
+
   // --- General solver private methods ---
 
   //! Compute L/U sparsity patterns for the given matrix structure.

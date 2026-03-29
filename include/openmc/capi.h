@@ -320,12 +320,6 @@ int openmc_properties_export(const char* filename);
 // \return Error code
 int openmc_properties_import(const char* filename);
 
-// Solve a Bateman system using CRAM. When perm is non-null, a triangular
-// forward-substitution solver optimized for pure-decay matrices is used.
-int openmc_cram_solve(int n, const int* indptr, const int* indices,
-  const double* data, const double* n0, double dt, int order,
-  const int* perm, double* result);
-
 // Solve multiple Bateman systems in parallel using CRAM with OpenMP.
 // Each material m has dimension dims[m]. CSC arrays are concatenated:
 //   all_indptr  has sum(dims[m]+1) entries,
@@ -362,89 +356,6 @@ int openmc_cram_expm(int n, const int* indptr, const int* indices,
 // Load a depletion chain from an XML file into the global chain object.
 // Replaces any previously loaded chain.
 int openmc_load_depletion_chain(const char* filename);
-
-// Form a depletion matrix using the globally loaded chain.
-// rates: flat [n_nucs_with_rates * n_reactions] row-major array of reaction
-//        rates for one material, indexed by (nuclide, reaction).
-// n_nucs_with_rates: number of nuclides with rate data.
-// n_reactions: number of reactions (must match chain.reactions().size() unless
-//              rx_indices is provided).
-// nuc_chain_indices: chain-nuclide index for each rate nuclide [n_nucs_with_rates].
-// n_fission_parents: number of fission-yield parents (0 = use default yields).
-// fy_parent_indices: chain index of each parent [n_fission_parents].
-// fy_product_indices: chain index of each product, packed per parent.
-// fy_yields: yield values, packed per parent (same layout as fy_product_indices).
-// fy_products_per_parent: number of products for each parent [n_fission_parents].
-// Out parameters — caller allocates:
-// out_indptr, out_indices, out_data: CSC arrays for the result.
-// out_nnz: on return, the actual number of nonzeros.
-// out_n: matrix dimension (chain size).
-// If out_indices or out_data is NULL, only out_nnz and out_n are populated
-// (query mode to discover buffer sizes).
-int openmc_chain_form_matrix(
-  const double* rates, int n_nucs_with_rates, int n_reactions,
-  const int* nuc_chain_indices,
-  int n_fission_parents,
-  const int* fy_parent_indices,
-  const int* fy_product_indices,
-  const double* fy_yields,
-  const int* fy_products_per_parent,
-  int* out_indptr, int* out_indices, double* out_data,
-  int* out_nnz, int* out_n);
-
-// Like openmc_chain_form_matrix but returns only the reaction-rate terms
-// (no decay contributions).
-int openmc_chain_form_rxn_matrix(
-  const double* rates, int n_nucs_with_rates, int n_reactions,
-  const int* nuc_chain_indices,
-  int n_fission_parents,
-  const int* fy_parent_indices,
-  const int* fy_product_indices,
-  const double* fy_yields,
-  const int* fy_products_per_parent,
-  int* out_indptr, int* out_indices, double* out_data,
-  int* out_nnz, int* out_n);
-
-// Compute combined depletion matrices (A_decay + s * A_rxn) for each material
-// from tally results.
-// norm_mode: 0 = fission_q, 1 = energy_deposition
-// source_rate_type: 0 = power, 1 = power_density, 2 = source
-// Returns per-material CSC matrices packed contiguously:
-//   out_indptr  [sum(n_chain+1)]
-//   out_indices [sum(nnz_per_mat)]
-//   out_data    [sum(nnz_per_mat)]
-// First call with out_indices=NULL to query nnz_per_mat and n_chain.
-int openmc_compute_depletion_rates(
-  const double* tally_means,
-  int n_materials,
-  int n_tallied_nucs,
-  int n_reactions,
-  const int* nuc_chain_indices,
-  const double* atom_counts,
-  const double* volumes,
-  double source_rate,
-  int source_rate_type,
-  int norm_mode,
-  const double* fission_q,
-  const double* heating_means,
-  int fission_rx_idx,
-  int* out_indptr,
-  int* out_indices,
-  double* out_data,
-  int* out_nnz_per_mat,
-  int* out_n_chain,
-  double* out_normalization_factor,
-  double* out_fission_energy);
-
-int openmc_update_depletable_materials(
-  int n_materials,
-  const int32_t* material_indices,
-  int n_chain,
-  const double* atom_counts,
-  const double* volumes,
-  const int* transportable,
-  int* nonzero_nuc_indices,
-  int* n_nonzero_out);
 
 // Configure the depletion kernel's persistent state.
 // Must be called after openmc_init() and openmc_load_depletion_chain().
