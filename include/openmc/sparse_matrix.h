@@ -55,6 +55,18 @@ public:
   bool operator==(const CSCPattern& other) const;
   bool operator!=(const CSCPattern& other) const { return !(*this == other); }
 
+  //! Compute structural reachability (transitive closure) under a topological
+  //! permutation. For each column j in permuted space, computes the set of row
+  //! indices reachable via the directed graph defined by off-diagonal entries.
+  //! The result is invariant for a given topology and can be reused across
+  //! time steps. Output is in flat CSC-like format.
+  //!
+  //! \param perm           Topological permutation: perm[new_idx] = old_idx
+  //! \param reach_indptr   Output column pointers [n+1]
+  //! \param reach_indices  Output row indices [total_reach]
+  void reachability(const vector<int>& perm, vector<int>& reach_indptr,
+    vector<int>& reach_indices) const;
+
 private:
   int n_ {0};           //!< Matrix dimension
   vector<int> indptr_;  //!< Column pointers [n+1]

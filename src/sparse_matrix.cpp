@@ -93,6 +93,116 @@ bool CSCPattern::operator==(const CSCPattern& other) const
          indices_ == other.indices_;
 }
 
+void CSCPattern::reachability(const vector<int>& perm,
+  vector<int>& reach_indptr, vector<int>& reach_indices) const
+{
+  int n = n_;
+
+  // Build inverse permutation
+  vector<int> inv_perm(n);
+  for (int i = 0; i < n; ++i) {
+    inv_perm[perm[i]] = i;
+  }
+
+  // Build lower-triangular column structure (off-diagonal only)
+  vector<int> lt_indptr(n + 1, 0);
+  for (int old_col = 0; old_col < n; ++old_col) {
+    int new_col = inv_perm[old_col];
+    for (int p = indptr_[old_col]; p < indptr_[old_col + 1]; ++p) {
+      int new_row = inv_perm[indices_[p]];
+      if (new_row != new_col) {
+        ++lt_indptr[new_col + 1];
+      }
+    }
+  }
+  for (int j = 0; j < n; ++j) {
+    lt_indptr[j + 1] += lt_indptr[j];
+  }
+
+  int lt_nnz = lt_indptr[n];
+  vector<int> lt_rowidx(lt_nnz);
+  vector<int> col_pos(n, 0);
+  for (int old_col = 0; old_col < n; ++old_col) {
+    int new_col = inv_perm[old_col];
+    for (int p = indptr_[old_col]; p < indptr_[old_col + 1]; ++p) {
+      int new_row = inv_perm[indices_[p]];
+      if (new_row != new_col) {
+        lt_rowidx[lt_indptr[new_col] + col_pos[new_col]++] = new_row;
+      }
+    }
+  }
+
+  // Sort row indices within each column
+  for (int j = 0; j < n; ++j) {
+    std::sort(lt_rowidx.begin() + lt_indptr[j],
+      lt_rowidx.begin() + lt_indptr[j + 1]);
+  }
+
+  // Compute reach via memoized transitive closure (leaves first).
+  // reach[j] = sorted indices of all nodes reachable from j (excluding j).
+  vector<vector<int>> reach(n);
+  vector<int> merge_buf;
+
+  for (int j = n - 1; j >= 0; --j) {
+    int n_children = lt_indptr[j + 1] - lt_indptr[j];
+    if (n_children == 0)
+      continue;
+
+    if (n_children == 1) {
+      int c = lt_rowidx[lt_indptr[j]];
+      auto& rc = reach[c];
+      reach[j].resize(1 + rc.size());
+      auto it = std::lower_bound(rc.begin(), rc.end(), c);
+      size_t pos = it - rc.begin();
+      std::copy(rc.begin(), it, reach[j].begin());
+      reach[j][pos] = c;
+      std::copy(it, rc.end(), reach[j].begin() + pos + 1);
+    } else {
+      int c0 = lt_rowidx[lt_indptr[j]];
+      auto& rc0 = reach[c0];
+      merge_buf.clear();
+      merge_buf.reserve(rc0.size() + 1);
+      auto it0 = std::lower_bound(rc0.begin(), rc0.end(), c0);
+      merge_buf.insert(merge_buf.end(), rc0.begin(), it0);
+      merge_buf.push_back(c0);
+      merge_buf.insert(merge_buf.end(), it0, rc0.end());
+
+      for (int lp = lt_indptr[j] + 1; lp < lt_indptr[j + 1]; ++lp) {
+        int c = lt_rowidx[lp];
+        auto& rc = reach[c];
+        vector<int> child_set;
+        child_set.reserve(rc.size() + 1);
+        auto itc = std::lower_bound(rc.begin(), rc.end(), c);
+        child_set.insert(child_set.end(), rc.begin(), itc);
+        child_set.push_back(c);
+        child_set.insert(child_set.end(), itc, rc.end());
+
+        vector<int> merged;
+        merged.reserve(merge_buf.size() + child_set.size());
+        std::set_union(merge_buf.begin(), merge_buf.end(), child_set.begin(),
+          child_set.end(), std::back_inserter(merged));
+        merge_buf = std::move(merged);
+      }
+
+      reach[j] = std::move(merge_buf);
+    }
+  }
+
+  // Flatten to CSC-like format
+  reach_indptr.resize(n + 1);
+  reach_indptr[0] = 0;
+  for (int j = 0; j < n; ++j) {
+    reach_indptr[j + 1] =
+      reach_indptr[j] + static_cast<int>(reach[j].size());
+  }
+  int total = reach_indptr[n];
+  reach_indices.resize(total);
+  for (int j = 0; j < n; ++j) {
+    std::copy(
+      reach[j].begin(), reach[j].end(), reach_indices.begin() + reach_indptr[j]);
+  }
+}
+
 CSCPattern CSCPattern::with_diagonal() const
 {
   // First pass: count entries per column, noting missing diagonals
@@ -165,6 +275,15 @@ CSCMatrix CSCMatrix::from_triplets(int n, const vector<int>& rows,
   indices.reserve(nt);
   data.reserve(nt);
 
+  // First pass: group duplicates and sum values into a temporary buffer.
+  // We need the sums before emitting entries so that zero sums are dropped.
+  struct Entry {
+    int row, col;
+    double val;
+  };
+  vector<Entry> entries;
+  entries.reserve(nt);
+
   int prev_col = -1;
   int prev_row = -1;
   for (int k = 0; k < nt; ++k) {
@@ -173,20 +292,27 @@ CSCMatrix CSCMatrix::from_triplets(int n, const vector<int>& rows,
     double v = vals[order[k]];
 
     if (j == prev_col && i == prev_row) {
-      // Sum duplicate entries
-      data.back() += v;
+      entries.back().val += v;
       continue;
     }
-
-    indices.push_back(i);
-    data.push_back(v);
-
-    // Fill column pointers for any skipped columns
-    for (int c = prev_col + 1; c <= j; ++c) {
-      indptr[c] = static_cast<int>(indices.size()) - 1;
-    }
+    entries.push_back({i, j, v});
     prev_col = j;
     prev_row = i;
+  }
+
+  // Second pass: emit only nonzero entries
+  prev_col = -1;
+  for (auto& e : entries) {
+    if (e.val == 0.0)
+      continue;
+
+    indices.push_back(e.row);
+    data.push_back(e.val);
+
+    for (int c = prev_col + 1; c <= e.col; ++c) {
+      indptr[c] = static_cast<int>(indices.size()) - 1;
+    }
+    prev_col = e.col;
   }
   // Fill remaining column pointers
   for (int c = prev_col + 1; c <= n; ++c) {
@@ -263,9 +389,12 @@ CSCMatrix CSCMatrix::operator+(const CSCMatrix& other) const
         new_data.push_back(other.data_[bi]);
         ++bi;
       } else {
-        // Same row: sum values
-        new_indices.push_back(a_indices[ai]);
-        new_data.push_back(data_[ai] + other.data_[bi]);
+        // Same row: sum values, drop if zero
+        double sum = data_[ai] + other.data_[bi];
+        if (sum != 0.0) {
+          new_indices.push_back(a_indices[ai]);
+          new_data.push_back(sum);
+        }
         ++ai;
         ++bi;
       }
@@ -296,16 +425,40 @@ CSCMatrix& CSCMatrix::operator+=(const CSCMatrix& other)
       other.n()));
   }
 
-  // Fast path: if this matrix's pattern is a superset of the other's,
-  // we can add values in-place without reallocating.
+  // Fast path: if patterns are identical, add values in-place.
   if (pattern_ == other.pattern()) {
+    bool has_zero = false;
     for (int k = 0; k < nnz(); ++k) {
       data_[k] += other.data_[k];
+      has_zero |= (data_[k] == 0.0);
     }
+    if (!has_zero)
+      return *this;
+
+    // Cancellation produced zeros — rebuild to drop them
+    const auto& ip = indptr();
+    const auto& ix = indices();
+    vector<int> new_indptr(n + 1);
+    vector<int> new_indices;
+    vector<double> new_data;
+    new_indices.reserve(nnz());
+    new_data.reserve(nnz());
+    for (int col = 0; col < n; ++col) {
+      new_indptr[col] = static_cast<int>(new_indices.size());
+      for (int p = ip[col]; p < ip[col + 1]; ++p) {
+        if (data_[p] != 0.0) {
+          new_indices.push_back(ix[p]);
+          new_data.push_back(data_[p]);
+        }
+      }
+    }
+    new_indptr[n] = static_cast<int>(new_indices.size());
+    pattern_ = CSCPattern(n, std::move(new_indptr), std::move(new_indices));
+    data_ = std::move(new_data);
     return *this;
   }
 
-  // General path: fall back to operator+
+  // General path: fall back to operator+ (which drops zeros)
   *this = *this + other;
   return *this;
 }

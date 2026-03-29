@@ -121,11 +121,8 @@ public:
 
   //! Compute structural reachability for a pure-decay matrix.
   //!
-  //! For each column j (in permuted space), computes the set of row indices
-  //! reachable via transitive closure of the decay DAG. This determines the
-  //! nonzero pattern of exp(A*dt) and is invariant for a given chain topology.
-  //! Result is in flat CSC-like format: reach_indptr[j]..reach_indptr[j+1]
-  //! indexes into reach_indices.
+  //! Delegates to CSCPattern::reachability after extracting the pattern.
+  //! Provided for backward compatibility.
   //!
   //! \param A              Sparse decay matrix
   //! \param perm           Topological permutation: perm[new_idx] = old_idx
@@ -133,7 +130,10 @@ public:
   //! \param reach_indices  Output row indices [total_reach]
   static void compute_reachability(const CSCMatrix& A,
     const vector<int>& perm, vector<int>& reach_indptr,
-    vector<int>& reach_indices);
+    vector<int>& reach_indices)
+  {
+    A.pattern().reachability(perm, reach_indptr, reach_indices);
+  }
 
 private:
   // --- CRAM coefficients ---
