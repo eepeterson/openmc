@@ -67,6 +67,20 @@ public:
   void reachability(const vector<int>& perm, vector<int>& reach_indptr,
     vector<int>& reach_indices) const;
 
+  //! Compute a topological sort of the directed graph defined by the
+  //! off-diagonal entries of this pattern. The graph has edge col -> row
+  //! for each off-diagonal entry (row, col). Returns a permutation vector
+  //! perm where perm[new_idx] = old_idx such that the permuted matrix is
+  //! lower-triangular (rows >= col for all entries).
+  //!
+  //! Uses Kahn's algorithm (BFS peeling of zero-in-degree nodes). Nodes
+  //! with equal in-degree are processed in ascending index order for
+  //! determinism.
+  //!
+  //! \return Topological permutation vector of length n
+  //! \throws std::runtime_error if the graph contains a cycle
+  vector<int> topological_sort() const;
+
 private:
   int n_ {0};           //!< Matrix dimension
   vector<int> indptr_;  //!< Column pointers [n+1]

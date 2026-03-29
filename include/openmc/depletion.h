@@ -124,7 +124,7 @@ struct DepletionState {
   int n_tallied_nucs {0};
 
   // --- Solver instance ---
-  IPFCramSolver cram_solver {IPFCramSolver::Order::cram48};
+  IPFCramSolver cram_solver {CramOrder::cram48};
 
   // --- State carried between macro-timesteps ---
   vector<CSCMatrix> prev_bos_matrices; //!< BOS matrices from previous step

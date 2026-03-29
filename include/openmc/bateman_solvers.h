@@ -12,6 +12,11 @@
 
 namespace openmc {
 
+class DepletionChain; // Forward declaration
+
+//! CRAM approximation order
+enum class CramOrder { cram16, cram48 };
+
 //==============================================================================
 //! Abstract base class for Bateman equation solvers
 //!
@@ -32,7 +37,7 @@ public:
 };
 
 //==============================================================================
-//! IPF CRAM solver for the Bateman equations
+//! IPF CRAM solver for general transmutation matrices
 //!
 //! Implements the Incomplete Partial Fraction form of the Chebyshev
 //! Rational Approximation Method (CRAM), as described in:
@@ -55,85 +60,11 @@ public:
 
 class IPFCramSolver : public BatemanSolver {
 public:
-  //! CRAM approximation order
-  enum class Order { cram16, cram48 };
-
-  explicit IPFCramSolver(Order order = Order::cram48);
+  explicit IPFCramSolver(CramOrder order = CramOrder::cram48);
 
   //! Solve using full LU factorization (general transmutation matrix).
   vector<double> solve(
     const CSCMatrix& A, const vector<double>& n0, double dt) override;
-
-  //! Solve a pure-decay system using triangular forward substitution.
-  //!
-  //! Exploits the fact that radioactive decay chains have a DAG structure:
-  //! a topological permutation makes the decay matrix strictly
-  //! lower-triangular. After permutation, each CRAM pole requires only
-  //! O(nnz) forward substitution instead of a full LU factorization.
-  //! At solve-time, the matrix values are scattered into the permuted
-  //! lower-triangular structure, so changing decay constants between calls
-  //! is fully supported without reconstruction.
-  //!
-  //! \param A    Sparse decay matrix (n x n)
-  //! \param n0   Initial atom densities [n]
-  //! \param dt   Time interval [s]
-  //! \param perm Topological permutation: perm[new_idx] = old_idx.
-  //!             Must reorder the decay matrix into lower-triangular form.
-  //! \return     Final atom densities [n]
-  vector<double> solve(const CSCMatrix& A, const vector<double>& n0,
-    double dt, const vector<int>& perm);
-
-  //! Compute the matrix exponential of a pure-decay matrix.
-  //!
-  //! Exploits topological permutation to lower-triangular form.
-  //! Each CRAM pole requires only forward substitution, and the IPF
-  //! iteration preserves sparsity across all poles: column j of exp(A*dt)
-  //! has nonzeros only at positions reachable from j in the decay DAG
-  //! (the transitive closure). For typical decay chains, this yields
-  //! dramatically sparser results (~0.5% vs ~25% for full burnup) and
-  //! a proportional speedup.
-  //!
-  //! \param A        Sparse decay matrix (n x n)
-  //! \param dt       Time interval [s]
-  //! \param drop_tol Entries with |value| < drop_tol are dropped (default 0)
-  //! \param perm     Topological permutation: perm[new_idx] = old_idx.
-  //!                 Must reorder the decay matrix into lower-triangular form.
-  //! \return         Sparse matrix exponential exp(A*dt) as CSCMatrix
-  CSCMatrix expm(const CSCMatrix& A, double dt, double drop_tol,
-    const vector<int>& perm);
-
-  //! Compute matrix exponential with precomputed reachability.
-  //!
-  //! Same as expm() but skips the internal reachability computation,
-  //! using the provided flat arrays instead. This enables the caller to
-  //! compute reachability once per chain and reuse it across time steps.
-  //!
-  //! \param A              Sparse decay matrix (n x n)
-  //! \param dt             Time interval [s]
-  //! \param drop_tol       Drop threshold for output entries
-  //! \param perm           Topological permutation: perm[new_idx] = old_idx
-  //! \param reach_indptr   Precomputed reach column pointers [n+1]
-  //! \param reach_indices  Precomputed reach row indices
-  //! \return               Sparse matrix exponential exp(A*dt) as CSCMatrix
-  CSCMatrix expm(const CSCMatrix& A, double dt, double drop_tol,
-    const vector<int>& perm, const int* reach_indptr,
-    const int* reach_indices);
-
-  //! Compute structural reachability for a pure-decay matrix.
-  //!
-  //! Delegates to CSCPattern::reachability after extracting the pattern.
-  //! Provided for backward compatibility.
-  //!
-  //! \param A              Sparse decay matrix
-  //! \param perm           Topological permutation: perm[new_idx] = old_idx
-  //! \param reach_indptr   Output column pointers [n+1]
-  //! \param reach_indices  Output row indices [total_reach]
-  static void compute_reachability(const CSCMatrix& A,
-    const vector<int>& perm, vector<int>& reach_indptr,
-    vector<int>& reach_indices)
-  {
-    A.pattern().reachability(perm, reach_indptr, reach_indices);
-  }
 
 private:
   // --- CRAM coefficients ---
@@ -142,7 +73,7 @@ private:
   vector<std::complex<double>> theta_; //!< Poles [n_poles]
   double alpha0_;                      //!< Limit at infinity
 
-  // --- General solver: symbolic factorization state ---
+  // --- Symbolic factorization state ---
 
   //! L factor structure (CSC, unit lower triangular, diagonal not stored).
   //! Row indices within each column are sorted in ascending order.
@@ -156,56 +87,115 @@ private:
   vector<int> u_indptr_; //!< Column pointers [n+1]
   vector<int> u_rowidx_; //!< Row indices [u_nnz]
 
-  // --- General solver: numeric factorization workspace ---
+  // --- Numeric factorization workspace ---
   vector<std::complex<double>> l_data_; //!< L factor values [l_nnz]
   vector<std::complex<double>> u_data_; //!< U factor values [u_nnz]
   vector<std::complex<double>> u_diag_; //!< U diagonal values [n]
   vector<std::complex<double>> work_;   //!< Dense workspace [n]
+  vector<std::complex<double>> x_;      //!< Complex solve result [n]
 
-  // --- Decay solver: permuted lower-triangular workspace ---
-  vector<int> lt_indptr_;    //!< Column pointers [n+1]
-  vector<int> lt_rowidx_;    //!< Row indices (below-diagonal only)
-  vector<double> lt_data_;   //!< Values (below-diagonal only)
-  vector<double> diag_;      //!< Diagonal values [n]
-
-  // --- Shared workspace ---
-  vector<std::complex<double>> x_; //!< Complex solve result [n]
-
-  // --- Decay solver private methods ---
-
-  //! Scatter a CSC matrix into permuted lower-triangular form.
-  //!
-  //! Populates diag_, lt_indptr_, lt_rowidx_, lt_data_ from the input
-  //! matrix using the given topological permutation. Row indices within
-  //! each column are sorted in ascending order after scatter.
-  //!
-  //! \param A    Sparse matrix (n x n)
-  //! \param perm Topological permutation: perm[new_idx] = old_idx
-  void scatter_to_lower_triangular(
-    const CSCMatrix& A, const vector<int>& perm);
-
-  // --- General solver private methods ---
-
-  //! Compute L/U sparsity patterns for the given matrix structure.
-  //! Uses a symbolic left-looking factorization with worklist-based fill
-  //! propagation through previously computed L column patterns.
+  // --- Private methods ---
   void symbolic_factorize(const CSCPattern& pattern);
 
-  //! Numerically factorize the shifted complex matrix (A*dt - theta*I).
-  //! Uses left-looking column LU without pivoting.
-  //! \param A       Real transmutation matrix
-  //! \param pattern Input sparsity pattern (A with forced diagonal)
-  //! \param dt      Time step
-  //! \param theta   Complex pole (shift)
   void numeric_factorize(const CSCMatrix& A, const CSCPattern& pattern,
     double dt, std::complex<double> theta);
 
-  //! Solve the triangular system LUx = b using the current factorization.
-  //! \param b  Right-hand side (real-valued initial composition)
-  //! \param x  Solution vector (complex-valued)
   void triangular_solve(
     const vector<double>& b, vector<std::complex<double>>& x) const;
+};
 
+//==============================================================================
+//! IPF CRAM decay solver using forward substitution
+//!
+//! Specialized solver for pure-decay (lower-triangular) matrices.
+//! Exploits the fact that radioactive decay chains have a DAG structure:
+//! a topological permutation makes the decay matrix strictly
+//! lower-triangular. After permutation, each CRAM pole requires only
+//! O(nnz) forward substitution instead of a full LU factorization.
+//!
+//! The permutation is provided at construction time and A.permute(perm)
+//! is called at each solve to extract the lower-triangular structure.
+//==============================================================================
+
+class IPFCramDecaySolver : public BatemanSolver {
+public:
+  //! Construct a decay solver from a depletion chain.
+  //! Reads the topological permutation from the chain.
+  //! \param order CRAM approximation order
+  //! \param chain Depletion chain with precomputed decay DAG properties
+  IPFCramDecaySolver(CramOrder order, const DepletionChain& chain);
+
+  //! Solve a pure-decay system via forward substitution.
+  vector<double> solve(
+    const CSCMatrix& A, const vector<double>& n0, double dt) override;
+
+private:
+  // --- CRAM coefficients ---
+  int n_poles_;
+  vector<std::complex<double>> alpha_;
+  vector<std::complex<double>> theta_;
+  double alpha0_;
+
+  // --- Structural data ---
+  vector<int> perm_; //!< Topological permutation
+
+  // --- Workspace (reused across calls) ---
+  vector<double> diag_;                //!< Diagonal values [n]
+  vector<std::complex<double>> x_;     //!< Complex solve workspace [n]
+};
+
+//==============================================================================
+//! IPF CRAM decay solver via cached matrix exponential
+//!
+//! Computes the full sparse matrix exponential exp(A*dt) once per
+//! distinct dt, then applies it via sparse matrix-vector multiply.
+//! This amortizes the O(n * total_reach * n_poles) exponential build
+//! across many materials that share the same decay matrix and timestep.
+//!
+//! The permutation and reachability data are provided at construction.
+//! The cached exponential is invalidated when dt changes.
+//==============================================================================
+
+class IPFCramExpmDecaySolver : public BatemanSolver {
+public:
+  //! Construct an expm decay solver from a depletion chain.
+  //! Reads the topological permutation and reachability from the chain.
+  //! \param order CRAM approximation order
+  //! \param chain Depletion chain with precomputed decay DAG properties
+  IPFCramExpmDecaySolver(CramOrder order, const DepletionChain& chain);
+
+  //! Solve by applying cached exp(A*dt) to n0.
+  //! Rebuilds the exponential if dt has changed since the last call.
+  vector<double> solve(
+    const CSCMatrix& A, const vector<double>& n0, double dt) override;
+
+  //! Build the sparse matrix exponential exp(A*dt).
+  //! \param A        Sparse decay matrix (n x n)
+  //! \param dt       Time interval [s]
+  //! \param drop_tol Entries with |value| < drop_tol are dropped
+  //! \return         Sparse matrix exponential exp(A*dt) as CSCMatrix
+  CSCMatrix build_expm(
+    const CSCMatrix& A, double dt, double drop_tol = 0.0);
+
+private:
+  // --- CRAM coefficients ---
+  int n_poles_;
+  vector<std::complex<double>> alpha_;
+  vector<std::complex<double>> theta_;
+  double alpha0_;
+
+  // --- Structural data ---
+  vector<int> perm_;          //!< Topological permutation
+  vector<int> reach_indptr_;  //!< Reach column pointers [n+1]
+  vector<int> reach_indices_; //!< Reach row indices
+
+  // --- Cached matrix exponential ---
+  CSCMatrix M_;           //!< Cached exp(A*dt)
+  double cached_dt_ {-1.0}; //!< dt used to build M_, or -1 if uncached
+
+  // --- Workspace ---
+  vector<double> diag_;            //!< Diagonal values [n]
+  vector<std::complex<double>> x_; //!< Complex workspace [n]
 };
 
 } // namespace openmc

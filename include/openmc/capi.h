@@ -325,32 +325,21 @@ int openmc_properties_import(const char* filename);
 //   all_indptr  has sum(dims[m]+1) entries,
 //   all_indices and all_data have sum(nnz_per_mat[m]) entries,
 //   all_n0 and all_results have sum(dims[m]) entries.
+// solver_type: 0 = general LU, 1 = decay forward-substitution.
+// Decay mode requires a loaded depletion chain (openmc_load_depletion_chain).
 int openmc_cram_solve_batch(int n_materials, const int* dims,
   const int* all_indptr, const int* all_indices, const double* all_data,
   const int* nnz_per_mat, const double* all_n0, double dt, int order,
-  const int* perm, double* all_results);
-
-// Compute the matrix exponential exp(A*dt) using CRAM.
-// Compute structural reachability for a decay matrix given a topological
-// permutation. Returns flat CSC-like arrays: reach_indptr[j]..reach_indptr[j+1]
-// indexes into reach_indices for column j's reachable rows. Two-call pattern:
-// first call with reach_indices=NULL to get total_reach and reach_indptr,
-// second call with allocated reach_indices buffer.
-int openmc_decay_reachability(int n, const int* indptr, const int* indices,
-  const double* data, const int* perm, int* reach_indptr,
-  int* reach_indices, int* total_reach);
+  int solver_type, double* all_results);
 
 // Compute the matrix exponential exp(A*dt) of a pure-decay matrix using CRAM.
-// Returns the result as a sparse CSC matrix. Entries with |value| < drop_tol
-// are omitted. When reach_indptr/reach_indices are provided (precomputed
-// reachability), the output nnz is known upfront and all output buffers must be
-// pre-allocated; a single call suffices. When reach_indptr is NULL, falls back
-// to the two-call pattern: first call with out_indices=NULL to query out_nnz
-// (and optionally fill out_indptr), second call with allocated buffers.
-// perm is required: topological permutation for the decay-optimized solver.
+// Requires a loaded depletion chain for topological permutation and
+// reachability data (openmc_load_depletion_chain). Returns the result as a
+// sparse CSC matrix. Entries with |value| < drop_tol are omitted. Two-call
+// pattern: first call with out_indices=NULL to query out_nnz and out_indptr,
+// second call with allocated buffers.
 int openmc_cram_expm(int n, const int* indptr, const int* indices,
   const double* data, double dt, int order, double drop_tol,
-  const int* perm, const int* reach_indptr, const int* reach_indices,
   int* out_indptr, int* out_indices, double* out_data, int* out_nnz);
 
 // Load a depletion chain from an XML file into the global chain object.

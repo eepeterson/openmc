@@ -179,6 +179,18 @@ public:
   //! from radioactive decay only.
   const CSCMatrix& decay_matrix() const { return decay_matrix_; }
 
+  //! Topological permutation of the decay DAG: perm[new_idx] = old_idx.
+  //! Computed once during load_xml(). Reorders the decay matrix into
+  //! strictly lower-triangular form.
+  const vector<int>& decay_perm() const { return decay_perm_; }
+
+  //! Structural reachability (transitive closure) of the decay DAG under
+  //! the topological permutation. Flat CSC-like format: reach_indptr[j]
+  //! to reach_indptr[j+1] indexes into reach_indices for column j's
+  //! reachable rows (in permuted space). Computed once during load_xml().
+  const vector<int>& decay_reach_indptr() const { return decay_reach_indptr_; }
+  const vector<int>& decay_reach_indices() const { return decay_reach_indices_; }
+
   //! Form the reaction-rate portion of the transmutation matrix.
   //!
   //! Builds only the terms that depend on reaction rates: transmutation
@@ -237,7 +249,10 @@ private:
   std::unordered_map<std::string, int> nuclide_map_;
   vector<std::string> reactions_;
   std::unordered_map<std::string, int> reaction_map_;
-  CSCMatrix decay_matrix_; //!< Cached decay-only transmutation matrix
+  CSCMatrix decay_matrix_;          //!< Cached decay-only transmutation matrix
+  vector<int> decay_perm_;           //!< Topological permutation of decay DAG
+  vector<int> decay_reach_indptr_;   //!< Reachability column pointers [n+1]
+  vector<int> decay_reach_indices_;  //!< Reachability row indices
 };
 
 //==============================================================================

@@ -203,6 +203,63 @@ void CSCPattern::reachability(const vector<int>& perm,
   }
 }
 
+vector<int> CSCPattern::topological_sort() const
+{
+  int n = n_;
+
+  // Build in-degree count from off-diagonal entries.
+  // Graph edge: col -> row for each off-diagonal (row, col) entry.
+  vector<int> in_degree(n, 0);
+  for (int col = 0; col < n; ++col) {
+    for (int p = indptr_[col]; p < indptr_[col + 1]; ++p) {
+      int row = indices_[p];
+      if (row != col) {
+        ++in_degree[row];
+      }
+    }
+  }
+
+  // Initialize queue with zero-in-degree nodes (ascending order)
+  // Using a min-heap for deterministic ordering.
+  vector<int> queue;
+  for (int i = 0; i < n; ++i) {
+    if (in_degree[i] == 0) {
+      queue.push_back(i);
+    }
+  }
+  // Make a min-heap (smallest index first)
+  std::make_heap(queue.begin(), queue.end(), std::greater<int>());
+
+  vector<int> perm;
+  perm.reserve(n);
+
+  while (!queue.empty()) {
+    std::pop_heap(queue.begin(), queue.end(), std::greater<int>());
+    int node = queue.back();
+    queue.pop_back();
+    perm.push_back(node);
+
+    // "Remove" node: decrement in-degree of successors
+    for (int p = indptr_[node]; p < indptr_[node + 1]; ++p) {
+      int row = indices_[p];
+      if (row != node) {
+        if (--in_degree[row] == 0) {
+          queue.push_back(row);
+          std::push_heap(queue.begin(), queue.end(), std::greater<int>());
+        }
+      }
+    }
+  }
+
+  if (static_cast<int>(perm.size()) != n) {
+    fatal_error(fmt::format(
+      "Topological sort failed: graph contains a cycle "
+      "({} of {} nodes processed)", perm.size(), n));
+  }
+
+  return perm;
+}
+
 CSCPattern CSCPattern::with_diagonal() const
 {
   // First pass: count entries per column, noting missing diagonals

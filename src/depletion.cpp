@@ -579,9 +579,9 @@ extern "C" int openmc_depletion_set_config(
     state->solver_order = solver_order;
 
     if (solver_order == 16) {
-      state->cram_solver = IPFCramSolver(IPFCramSolver::Order::cram16);
+      state->cram_solver = IPFCramSolver(CramOrder::cram16);
     } else {
-      state->cram_solver = IPFCramSolver(IPFCramSolver::Order::cram48);
+      state->cram_solver = IPFCramSolver(CramOrder::cram48);
     }
 
     g_depletion_state = std::move(state);

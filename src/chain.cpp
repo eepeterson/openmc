@@ -440,6 +440,11 @@ void DepletionChain::build_decay_matrix()
   }
 
   decay_matrix_ = CSCMatrix::from_triplets(n, rows, cols, vals);
+
+  // Compute topological permutation and reachability for the decay DAG
+  decay_perm_ = decay_matrix_.pattern().topological_sort();
+  decay_matrix_.pattern().reachability(
+    decay_perm_, decay_reach_indptr_, decay_reach_indices_);
 }
 
 CSCMatrix DepletionChain::form_rxn_matrix(
