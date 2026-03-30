@@ -272,7 +272,6 @@ _dll.openmc_depletion_execute_step.argtypes = [
     _array_1d_dbl,  # n_bos_flat
     c_double,       # dt
     c_double,       # source_rate
-    c_double,       # prev_dt
     c_int,          # run_transport
     _array_1d_dbl,  # out_eos_flat
     POINTER(c_double),  # out_k_eff
@@ -280,10 +279,11 @@ _dll.openmc_depletion_execute_step.argtypes = [
 
 
 def depletion_execute_step(scheme_name, n_bos_flat, dt, source_rate,
-                           prev_dt, run_transport):
+                           run_transport):
     """Execute one macro-timestep of a depletion scheme via C++.
 
-    Previous-step BOS matrices are managed internally by the C++ kernel.
+    Previous-step BOS matrices and prev_dt are managed internally
+    by the C++ kernel.
 
     Parameters
     ----------
@@ -295,8 +295,6 @@ def depletion_execute_step(scheme_name, n_bos_flat, dt, source_rate,
         Timestep in seconds.
     source_rate : float
         Power [W] or source rate [n/s].
-    prev_dt : float
-        Previous timestep in seconds (0.0 for first step).
     run_transport : bool
         Whether to run transport or reuse cached results.
 
@@ -314,7 +312,7 @@ def depletion_execute_step(scheme_name, n_bos_flat, dt, source_rate,
 
     _dll.openmc_depletion_execute_step(
         scheme_name.encode(), bos, dt, source_rate,
-        prev_dt, int(run_transport), eos, byref(k_eff))
+        int(run_transport), eos, byref(k_eff))
 
     return eos, k_eff.value
 

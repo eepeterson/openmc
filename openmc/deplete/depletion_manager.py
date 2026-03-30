@@ -433,7 +433,7 @@ class DepletionManager:
             self._solver_order)
 
     def _execute_step(self, scheme_name, n_bos_list, dt,
-                      source_rate, prev_dt):
+                      source_rate):
         """Execute one macro-timestep using the C++ kernel.
 
         Parameters
@@ -446,8 +446,6 @@ class DepletionManager:
             Timestep in seconds.
         source_rate : float
             Power [W] or source rate [n/s].
-        prev_dt : float
-            Previous timestep in seconds (0.0 for first step).
 
         Returns
         -------
@@ -459,7 +457,7 @@ class DepletionManager:
         n_bos_flat = np.concatenate(n_bos_list)
         eos_flat, k_eff = depletion_execute_step(
             scheme_name, n_bos_flat, dt, source_rate,
-            prev_dt, self._should_run_transport)
+            self._should_run_transport)
 
         # Unpack EOS into per-material arrays
         n_end_list = [
@@ -740,7 +738,6 @@ class DepletionManager:
                 t = 0.0
                 step_offset = 0
 
-            prev_dt = None
             k_eff = 0.0
             source_rate = self._source_rates[0]
 
@@ -754,8 +751,7 @@ class DepletionManager:
                 if i == 0 and self._scheme_fallback_name is not None:
                     scheme_name = self._scheme_fallback_name
                 n_end, k_eff = self._execute_step(
-                    scheme_name, n, dt, source_rate,
-                    prev_dt if prev_dt is not None else 0.0)
+                    scheme_name, n, dt, source_rate)
 
                 proc_time = time.time() - t0
 
@@ -763,7 +759,6 @@ class DepletionManager:
                                 source_rate, k_eff, proc_time)
 
                 n = n_end
-                prev_dt = dt
                 t += dt
 
             # Write final zero-width entry for Results API compatibility

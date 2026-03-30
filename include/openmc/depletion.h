@@ -20,16 +20,28 @@ enum class NormalizationMode { fission_q, energy_deposition };
 //! How source_rate should be interpreted
 enum class SourceRateType { power, power_density, source };
 
-//! Result of extracting reaction rates from transport tallies and
-//! combining them with the decay matrix.
-struct DepletionRates {
-  vector<CSCMatrix> combined_matrices; //!< A_decay + s * A_rxn per material
-  double normalization_factor;         //!< source normalization s [src/s]
-  double fission_energy;               //!< total fission energy [eV/src]
+//! Result of extracting reaction rates from transport tallies.
+//! Contains per-material reaction matrices (A_rxn, per source particle)
+//! and the normalization factor s that converts them to 1/s units.
+//! The decay matrix is NOT included — it is an immutable property of
+//! the chain and is added at solve time by handle_expm.
+struct TransportResult {
+  vector<CSCMatrix> rxn_matrices;  //!< A_rxn per material (per src particle)
+  double normalization_factor;     //!< source normalization s [src/s]
+  double fission_energy;           //!< total fission energy [eV/src]
 };
 
-//! Extract reaction-rate matrices from tally data and build combined
-//! depletion matrices (A_decay + s * A_rxn) for each material.
+//! Per-transport-step data stored during scheme execution.
+//! Holds the reaction matrices and normalization factor from one
+//! TRANSPORT node so that EXPM nodes can combine them later.
+struct StepMatrices {
+  vector<CSCMatrix> rxn_matrices;  //!< A_rxn per material
+  double norm_factor {0.0};        //!< normalization factor s [src/s]
+};
+
+//! Extract reaction-rate matrices from tally data and compute the
+//! normalization factor.  Returns A_rxn matrices (per source particle)
+//! without adding the decay matrix — that is deferred to solve time.
 //!
 //! \param tally_means  Flat tally output, row-major with shape
 //!                     [n_materials, n_tallied_nucs, n_reactions].
@@ -52,8 +64,8 @@ struct DepletionRates {
 //!                      May be nullptr otherwise.
 //! \param fission_rx_idx  Index of 'fission' in the reaction score list,
 //!                        or -1 if fission is not scored.
-//! \return DepletionRates with combined matrices and normalization info.
-DepletionRates compute_depletion_rates(
+//! \return TransportResult with A_rxn matrices and normalization info.
+TransportResult compute_rxn_matrices(
   const double* tally_means,
   int n_materials,
   int n_tallied_nucs,
@@ -127,16 +139,16 @@ struct DepletionState {
   IPFCramSolver cram_solver {CramOrder::cram48};
 
   // --- State carried between macro-timesteps ---
-  vector<CSCMatrix> prev_bos_matrices; //!< BOS matrices from previous step
-  double prev_dt {0.0};               //!< Previous timestep [s]
+  StepMatrices prev_bos_rxn;   //!< BOS rxn matrices from previous step
+  double prev_dt {0.0};        //!< Previous timestep [s]
 };
 
 //! Result of executing one macro-timestep.
 struct SchemeStepResult {
   //! EOS atom counts per material, each length n_chain
   vector<vector<double>> eos_densities;
-  //! BOS combined matrices (for PREV_STEP on next step)
-  vector<CSCMatrix> bos_matrices;
+  //! BOS reaction matrices + normalization (for PREV_STEP on next step)
+  StepMatrices bos_rxn;
   //! k-effective from last transport in this step
   double k_eff {1.0};
 };
@@ -145,28 +157,25 @@ struct SchemeStepResult {
 //!
 //! Interprets the scheme DAG, running transport (update materials →
 //! openmc_reset → openmc_run → extract rates) for Transport nodes
-//! and CRAM solves for Expm nodes.
+//! and CRAM solves for Expm nodes.  The decay matrix is read from
+//! the chain at solve time — TRANSPORT nodes produce only A_rxn.
 //!
 //! \param scheme         Integration scheme to execute.
 //! \param state          Depletion configuration (modified: nuc_chain_indices
-//!                       updated per transport).
+//!                       updated per transport; prev_bos_rxn and prev_dt
+//!                       provide previous-step data for LE/QI schemes).
 //! \param n_bos          BOS atom counts per material [n_materials][n_chain].
 //! \param dt             Timestep in seconds.
 //! \param source_rate    Power [W] or source rate [n/s].
-//! \param prev_step_matrices  BOS matrices from previous macro-step for
-//!                            LE/QI PREV_STEP reference. nullptr if none.
-//! \param prev_dt        Previous timestep in seconds (for LE/QI weights).
 //! \param run_transport  If false, reuse cached results for all Transport
 //!                       nodes (transport_schedule support).
-//! \return SchemeStepResult with EOS densities, BOS matrices, and k_eff.
+//! \return SchemeStepResult with EOS densities, BOS rxn matrices, and k_eff.
 SchemeStepResult execute_scheme_step(
   const IntegrationScheme& scheme,
   DepletionState& state,
   const vector<vector<double>>& n_bos,
   double dt,
   double source_rate,
-  const vector<CSCMatrix>* prev_step_matrices,
-  double prev_dt,
   bool run_transport);
 
 } // namespace openmc

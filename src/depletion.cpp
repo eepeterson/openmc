@@ -20,7 +20,7 @@ namespace openmc {
 // Joules per eV
 static constexpr double JOULE_PER_EV = 1.602176634e-19;
 
-DepletionRates compute_depletion_rates(
+TransportResult compute_rxn_matrices(
   const double* tally_means,
   int n_materials,
   int n_tallied_nucs,
@@ -37,10 +37,9 @@ DepletionRates compute_depletion_rates(
 {
   auto& chain = *data::depletion_chain;
   int n_chain = chain.size();
-  const auto& A_decay = chain.decay_matrix();
 
-  DepletionRates result;
-  result.combined_matrices.reserve(n_materials);
+  TransportResult result;
+  result.rxn_matrices.reserve(n_materials);
   double total_fission_energy = 0.0;
 
   // Temporary buffer for rates_per_atom for one material
@@ -79,11 +78,11 @@ DepletionRates compute_depletion_rates(
       total_fission_energy += heating_means[m];
     }
 
-    // Form A_rxn via chain
+    // Form A_rxn via chain (per source particle, not yet scaled by s)
     CSCMatrix A_rxn = chain.form_rxn_matrix(
       rates_per_atom.data(), n_tallied_nucs, n_reactions, nuc_chain_indices);
 
-    result.combined_matrices.push_back(std::move(A_rxn));
+    result.rxn_matrices.push_back(std::move(A_rxn));
   }
 
   // Compute normalization factor s
@@ -96,11 +95,6 @@ DepletionRates compute_depletion_rates(
       s = source_rate / (total_fission_energy * JOULE_PER_EV);
     }
     // If total_fission_energy == 0, s stays 0 (decay-only)
-  }
-
-  // Combine: A = A_decay + s * A_rxn for each material
-  for (int m = 0; m < n_materials; ++m) {
-    result.combined_matrices[m] = A_decay + s * result.combined_matrices[m];
   }
 
   result.normalization_factor = s;
@@ -184,15 +178,15 @@ static vector<double> get_tally_means(int32_t tally_idx)
 }
 
 // Helper: run transport for one node in the scheme.  Updates materials,
-// resets tallies, calls openmc_run, extracts combined matrices.
+// resets tallies, calls openmc_run, extracts reaction matrices.
+// The decay matrix is NOT included — that is deferred to handle_expm.
 static void handle_transport(
   DepletionState& state,
   const vector<double>& dens_flat,
   double source_rate,
   bool run_transport,
-  vector<CSCMatrix>& out_matrices,
-  double& out_k_eff,
-  double& out_fission_energy)
+  StepMatrices& out,
+  double& out_k_eff)
 {
   auto& chain = *data::depletion_chain;
   int n_chain = chain.size();
@@ -236,43 +230,47 @@ static void handle_transport(
       heating_ptr = heating_means.data();
     }
 
-    // Compute combined matrices (A_decay + s * A_rxn)
-    auto rates = compute_depletion_rates(
+    // Compute A_rxn matrices and normalization factor (no decay matrix)
+    auto result = compute_rxn_matrices(
       rate_means.data(), state.n_materials, state.n_tallied_nucs,
       state.n_reactions, state.nuc_chain_indices.data(),
       dens_flat.data(), state.volumes.data(), source_rate,
       state.source_rate_type, state.norm_mode,
       state.fission_q.data(), heating_ptr, state.fission_rx_idx);
 
-    out_matrices = std::move(rates.combined_matrices);
-    out_fission_energy = rates.fission_energy;
+    out.rxn_matrices = std::move(result.rxn_matrices);
+    out.norm_factor = result.normalization_factor;
   }
-  // If !run_transport, out_matrices retains its previous values (cached)
+  // If !run_transport, out retains its previous values (cached)
 }
 
-// Helper: execute an Expm step — weighted matrix sum + CRAM solve
+// Helper: execute an Expm step — weighted matrix sum + CRAM solve.
+// Builds A = w_sum * A_decay + sum(w_i * s_i * A_rxn_i) per material,
+// where A_decay comes from the chain (immutable) and each (A_rxn_i, s_i)
+// comes from a TRANSPORT step's StepMatrices.
 static void handle_expm(
   const SchemeStep& step,
   DepletionState& state,
   int n_chain,
   double dt,
-  double prev_dt,
-  // maps from step index to matrices per material:
-  const std::unordered_map<int, vector<CSCMatrix>>& matrix_store,
+  // maps from step index to StepMatrices:
+  const std::unordered_map<int, StepMatrices>& matrix_store,
   // maps from step index to densities per material:
   const std::unordered_map<int, vector<vector<double>>>& density_store,
-  const vector<CSCMatrix>* prev_step_matrices,
-  const std::unordered_map<int, vector<CSCMatrix>>* avg_matrix_store,
+  const std::unordered_map<int, StepMatrices>* avg_matrix_store,
   vector<vector<double>>& out_densities)
 {
   int n_mats = state.n_materials;
+  const auto& A_decay = data::depletion_chain->decay_matrix();
 
-  // Build weighted matrix sum per material
-  vector<CSCMatrix> combined;
-  combined.reserve(n_mats);
+  // Build weighted reaction matrix sum per material
+  vector<CSCMatrix> weighted_rxn;
+  weighted_rxn.reserve(n_mats);
   for (int m = 0; m < n_mats; ++m) {
-    combined.push_back(CSCMatrix(n_chain));
+    weighted_rxn.push_back(CSCMatrix(n_chain));
   }
+
+  double w_sum = 0.0;
 
   for (const auto& term : step.terms) {
     // Resolve weight
@@ -280,26 +278,30 @@ static void handle_expm(
     if (term.weight_fn == WeightFn::STATIC) {
       w = term.static_weight;
     } else {
-      w = eval_weight_fn(term.weight_fn, prev_dt, dt);
+      w = eval_weight_fn(term.weight_fn, state.prev_dt, dt);
     }
+    w_sum += w;
 
-    // Resolve matrix source
-    const vector<CSCMatrix>* mats = nullptr;
+    // Resolve StepMatrices source
+    const StepMatrices* src = nullptr;
     if (term.matrix_source == REF_PREV_STEP) {
-      mats = prev_step_matrices;
+      if (!state.prev_bos_rxn.rxn_matrices.empty()) {
+        src = &state.prev_bos_rxn;
+      }
     } else if (term.use_average && avg_matrix_store) {
       auto it = avg_matrix_store->find(term.matrix_source);
       if (it != avg_matrix_store->end())
-        mats = &it->second;
+        src = &it->second;
     } else {
       auto it = matrix_store.find(term.matrix_source);
       if (it != matrix_store.end())
-        mats = &it->second;
+        src = &it->second;
     }
 
-    if (mats) {
+    if (src) {
+      double coeff = w * src->norm_factor;
       for (int m = 0; m < n_mats; ++m) {
-        combined[m] += w * (*mats)[m];
+        weighted_rxn[m] += coeff * src->rxn_matrices[m];
       }
     }
   }
@@ -320,14 +322,15 @@ static void handle_expm(
       input_dens = &it->second;
   }
 
-  // CRAM solve per material
+  // CRAM solve per material: A = w_sum * A_decay + weighted_rxn[m]
   if (!input_dens) {
     fatal_error("Depletion Expm step: density source not found in store.");
   }
   out_densities.resize(n_mats);
   for (int m = 0; m < n_mats; ++m) {
+    CSCMatrix A = w_sum * A_decay + weighted_rxn[m];
     out_densities[m] =
-      state.cram_solver.solve(combined[m], (*input_dens)[m], dt);
+      state.cram_solver.solve(A, (*input_dens)[m], dt);
   }
 }
 
@@ -337,8 +340,6 @@ SchemeStepResult execute_scheme_step(
   const vector<vector<double>>& n_bos,
   double dt,
   double source_rate,
-  const vector<CSCMatrix>* prev_step_matrices,
-  double prev_dt,
   bool run_transport)
 {
   auto& chain = *data::depletion_chain;
@@ -347,15 +348,14 @@ SchemeStepResult execute_scheme_step(
 
   // Storage for results indexed by step index
   std::unordered_map<int, vector<vector<double>>> density_store;
-  std::unordered_map<int, vector<CSCMatrix>> matrix_store;
+  std::unordered_map<int, StepMatrices> matrix_store;
 
   // Store BOS density under REF_BOS sentinel
   density_store[REF_BOS] = n_bos;
 
   // Cache for transport results (reused when !run_transport)
-  vector<CSCMatrix> cached_matrices;
+  StepMatrices cached;
   double cached_k_eff = 1.0;
-  double cached_fission_energy = 0.0;
   int bos_transport_idx = -1;
 
   // Track last Expm index before an Iterate (for PREV_ITER seeding)
@@ -384,10 +384,10 @@ SchemeStepResult execute_scheme_step(
       }
 
       handle_transport(state, dens_flat, source_rate, run_transport,
-        cached_matrices, cached_k_eff, cached_fission_energy);
+        cached, cached_k_eff);
 
-      // Store matrices under this step's index
-      matrix_store[i] = cached_matrices;
+      // Store StepMatrices under this step's index
+      matrix_store[i] = cached;
 
       if (bos_transport_idx < 0) {
         bos_transport_idx = i;
@@ -397,8 +397,8 @@ SchemeStepResult execute_scheme_step(
 
     case StepType::EXPM: {
       vector<vector<double>> result;
-      handle_expm(step, state, n_chain, dt, prev_dt,
-        matrix_store, density_store, prev_step_matrices,
+      handle_expm(step, state, n_chain, dt,
+        matrix_store, density_store,
         nullptr, result);
       density_store[i] = std::move(result);
       last_expm_idx = i;
@@ -423,8 +423,10 @@ SchemeStepResult execute_scheme_step(
         }
       }
 
-      // Running average matrices per transport step index
-      std::unordered_map<int, vector<CSCMatrix>> avg_matrices;
+      // Running average of pre-scaled reaction matrices (s * A_rxn)
+      // per transport step index.  norm_factor is set to 1.0 since s
+      // is already baked into the averaged rxn_matrices.
+      std::unordered_map<int, StepMatrices> avg_matrices;
 
       for (int iter = 1; iter <= step.n_iterations; ++iter) {
         int body_last_expm = -1;
@@ -450,26 +452,34 @@ SchemeStepResult execute_scheme_step(
             }
 
             handle_transport(state, dens_flat, source_rate, run_transport,
-              cached_matrices, cached_k_eff, cached_fission_energy);
-            matrix_store[b] = cached_matrices;
+              cached, cached_k_eff);
+            matrix_store[b] = cached;
 
-            // Update running average
+            // Update running average of pre-scaled (s * A_rxn) matrices.
+            // We average s*A_rxn (not raw A_rxn) because s may change
+            // between iterations as compositions evolve.
+            double s = cached.norm_factor;
             if (iter == 1) {
-              avg_matrices[b] = cached_matrices;
+              avg_matrices[b].rxn_matrices.resize(n_mats);
+              for (int m = 0; m < n_mats; ++m) {
+                avg_matrices[b].rxn_matrices[m] =
+                  s * cached.rxn_matrices[m];
+              }
+              avg_matrices[b].norm_factor = 1.0;
             } else {
               double alpha = 1.0 / iter;
               for (int m = 0; m < n_mats; ++m) {
-                // avg = alpha * current + (1 - alpha) * avg
-                avg_matrices[b][m] =
-                  alpha * cached_matrices[m] +
-                  (1.0 - alpha) * avg_matrices[b][m];
+                // avg = alpha * (s * current) + (1 - alpha) * avg
+                avg_matrices[b].rxn_matrices[m] =
+                  alpha * (s * cached.rxn_matrices[m]) +
+                  (1.0 - alpha) * avg_matrices[b].rxn_matrices[m];
               }
             }
 
           } else if (bstep.type == StepType::EXPM) {
             vector<vector<double>> result;
-            handle_expm(bstep, state, n_chain, dt, prev_dt,
-              matrix_store, density_store, prev_step_matrices,
+            handle_expm(bstep, state, n_chain, dt,
+              matrix_store, density_store,
               &avg_matrices, result);
             density_store[b] = std::move(result);
             body_last_expm = b;
@@ -524,9 +534,9 @@ SchemeStepResult execute_scheme_step(
   }
   result.k_eff = cached_k_eff;
 
-  // BOS matrices for next step's PREV_STEP reference
+  // BOS rxn matrices for next step's PREV_STEP reference
   if (bos_transport_idx >= 0) {
-    result.bos_matrices = std::move(matrix_store[bos_transport_idx]);
+    result.bos_rxn = std::move(matrix_store[bos_transport_idx]);
   }
 
   return result;
@@ -597,7 +607,6 @@ extern "C" int openmc_depletion_execute_step(
   const double* n_bos_flat,
   double dt,
   double source_rate,
-  double prev_dt,
   int run_transport,
   double* out_eos_flat,
   double* out_k_eff)
@@ -630,17 +639,12 @@ extern "C" int openmc_depletion_execute_step(
         n_bos_flat + (m + 1) * n_chain);
     }
 
-    // Use previous step matrices from internal state
-    const vector<CSCMatrix>* prev_mats_ptr =
-      state.prev_bos_matrices.empty() ? nullptr : &state.prev_bos_matrices;
-
-    // Execute the scheme step
+    // Execute the scheme step (prev_dt and prev_bos_rxn read from state)
     SchemeStepResult result = execute_scheme_step(
-      *scheme, state, n_bos, dt, source_rate,
-      prev_mats_ptr, prev_dt, run_transport != 0);
+      *scheme, state, n_bos, dt, source_rate, run_transport != 0);
 
-    // Store BOS matrices for next step's PREV_STEP reference
-    state.prev_bos_matrices = std::move(result.bos_matrices);
+    // Store BOS rxn matrices for next step's PREV_STEP reference
+    state.prev_bos_rxn = std::move(result.bos_rxn);
     state.prev_dt = dt;
 
     // Pack EOS densities

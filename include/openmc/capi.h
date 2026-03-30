@@ -363,13 +363,12 @@ int openmc_depletion_set_config(
   int solver_order);
 
 // Execute one macro-timestep of a depletion integration scheme.
-// Previous-step BOS matrices are managed internally in the depletion state.
+// Previous-step BOS matrices and prev_dt are managed internally.
 int openmc_depletion_execute_step(
   const char* scheme_name,
   const double* n_bos_flat,
   double dt,
   double source_rate,
-  double prev_dt,
   int run_transport,
   double* out_eos_flat,
   double* out_k_eff);
