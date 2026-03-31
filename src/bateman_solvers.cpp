@@ -415,13 +415,6 @@ void IPFCramSolver::triangular_solve(
 
 
 //==============================================================================
-// Sparse triangular solve for basis vector RHS
-//
-// Solves LUx = e_j using structural reachability in the L-factor graph.
-// The reach vector contains the sorted column indices reachable from j
-// in the directed graph of L (edge k->i iff L[i,k] != 0 structurally).
-
-//==============================================================================
 // IPFCramDecaySolver implementation
 //==============================================================================
 
@@ -814,47 +807,24 @@ CSCMatrix IPFCramExpmDecaySolver::build_expm(
 
 using namespace openmc;
 
-extern "C" int openmc_cram_solve(int n, const int* indptr,
-  const int* indices, const double* data, const double* n0,
-  double dt, int order, int solver_type, double* result)
+extern "C" int openmc_cram_solve(int n, const int* indptr, const int* indices,
+  const double* data, const double* n0, double dt, int order, double* result)
 {
   try {
     if (order != 16 && order != 48) {
-      set_errmsg(fmt::format(
-        "CRAM order must be 16 or 48, got {}", order));
-      return OPENMC_E_INVALID_ARGUMENT;
-    }
-    if (solver_type != 0 && solver_type != 1) {
-      set_errmsg(fmt::format(
-        "solver_type must be 0 (general) or 1 (decay), got {}", solver_type));
+      set_errmsg(fmt::format("CRAM order must be 16 or 48, got {}", order));
       return OPENMC_E_INVALID_ARGUMENT;
     }
 
-    auto cram_order = (order == 16) ? CramOrder::cram16
-                                    : CramOrder::cram48;
-
-    if (solver_type == 1 && !data::depletion_chain) {
-      set_errmsg("Decay solver requires a loaded depletion chain "
-                 "(call openmc_load_depletion_chain first)");
-      return OPENMC_E_INVALID_ARGUMENT;
-    }
+    auto cram_order = (order == 16) ? CramOrder::cram16 : CramOrder::cram48;
 
     int nnz = indptr[n];
-    CSCPattern pattern(
-      n, vector<int>(indptr, indptr + n + 1),
-      vector<int>(indices, indices + nnz));
-    CSCMatrix A(std::move(pattern), vector<double>(data, data + nnz));
+    CSCMatrix A(n, vector<int>(indptr, indptr + n + 1),
+      vector<int>(indices, indices + nnz), vector<double>(data, data + nnz));
     vector<double> n0_vec(n0, n0 + n);
 
-    unique_ptr<BatemanSolver> solver;
-    if (solver_type == 1) {
-      solver = make_unique<IPFCramDecaySolver>(
-        cram_order, *data::depletion_chain);
-    } else {
-      solver = make_unique<IPFCramSolver>(cram_order);
-    }
-
-    vector<double> y = solver->solve(A, n0_vec, dt);
+    IPFCramSolver solver(cram_order);
+    vector<double> y = solver.solve(A, n0_vec, dt);
     std::copy(y.begin(), y.end(), result);
   } catch (const std::exception& e) {
     set_errmsg(e.what());

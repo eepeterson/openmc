@@ -140,8 +140,8 @@ private:
   vector<int> perm_; //!< Topological permutation
 
   // --- Workspace (reused across calls) ---
-  vector<double> diag_;                //!< Diagonal values [n]
-  vector<std::complex<double>> x_;     //!< Complex solve workspace [n]
+  vector<double> diag_;            //!< Diagonal values [n]
+  vector<std::complex<double>> x_; //!< Complex solve workspace [n]
 };
 
 //==============================================================================
@@ -190,7 +190,7 @@ private:
   vector<int> reach_indices_; //!< Reach row indices
 
   // --- Cached matrix exponential ---
-  CSCMatrix M_;           //!< Cached exp(A*dt)
+  CSCMatrix M_;              //!< Cached exp(A*dt)
   double cached_dt_ {-1.0}; //!< dt used to build M_, or -1 if uncached
 
   // --- Workspace ---

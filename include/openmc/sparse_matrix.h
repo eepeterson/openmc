@@ -23,9 +23,7 @@ class CSCPattern {
 public:
   // Constructors
   CSCPattern() = default;
-  CSCPattern(int n, vector<int> indptr, vector<int> indices)
-    : n_(n), indptr_(std::move(indptr)), indices_(std::move(indices))
-  {}
+  CSCPattern(int n, vector<int> indptr, vector<int> indices);
 
   //! Construct from coordinate (COO) triplets.
   //! Duplicate (row, col) pairs are allowed — only the structural pattern
@@ -98,6 +96,8 @@ class CSCMatrix {
 public:
   // Constructors
   CSCMatrix() = default;
+  CSCMatrix(
+    int n, vector<int> indptr, vector<int> indices, vector<double> data);
   CSCMatrix(CSCPattern pattern, vector<double> data)
     : pattern_(std::move(pattern)), data_(std::move(data))
   {}

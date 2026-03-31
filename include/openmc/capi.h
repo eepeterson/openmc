@@ -320,13 +320,23 @@ int openmc_properties_export(const char* filename);
 // \return Error code
 int openmc_properties_import(const char* filename);
 
-// Solve a single Bateman system A*n0 over time dt using CRAM.
-// The matrix A is in CSC format with dimension n.
-// solver_type: 0 = general LU, 1 = decay forward-substitution.
-// Decay mode requires a loaded depletion chain (openmc_load_depletion_chain).
+//! Solve a Bateman system dN/dt = A*N over interval dt using CRAM.
+//!
+//! The transmutation matrix A is provided in CSC (Compressed Sparse Column)
+//! format. The result is written to a caller-allocated output buffer.
+//!
+//! \param[in] n         Matrix dimension (number of nuclides)
+//! \param[in] indptr    CSC column pointers [n+1]
+//! \param[in] indices   CSC row indices [nnz]
+//! \param[in] data      CSC nonzero values [nnz]
+//! \param[in] n0        Initial atom densities [n]
+//! \param[in] dt        Time interval in seconds
+//! \param[in] order     CRAM approximation order (16 or 48)
+//! \param[out] result   Final atom densities [n]
+//! \return Error code
 int openmc_cram_solve(int n, const int* indptr, const int* indices,
   const double* data, const double* n0, double dt, int order,
-  int solver_type, double* result);
+  double* result);
 
 // Solve multiple Bateman systems in parallel using CRAM with OpenMP.
 // Each material m has dimension dims[m]. CSC arrays are concatenated:
