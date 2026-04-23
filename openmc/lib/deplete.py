@@ -63,6 +63,54 @@ def cram_solve(A, n0, dt, order=48):
     return result
 
 
+def cram_decay_solve(A, n0, dt, order=48):
+    """Solve a single Bateman system using the decay-optimized C++ CRAM solver.
+
+    Uses the IPFCramDecaySolver, which exploits topological permutation to
+    lower-triangular form for forward substitution. This produces guaranteed
+    non-negative results and is faster than the general LU-based solver for
+    pure-decay matrices.
+
+    Requires a loaded depletion chain (call :func:`load_depletion_chain`
+    first) which provides the topological permutation.
+
+    Parameters
+    ----------
+    A : scipy.sparse.csc_array or scipy.sparse.csc_matrix
+        Sparse decay matrix in CSC format.
+    n0 : numpy.ndarray
+        Initial atom number vector.
+    dt : float
+        Time step in seconds.
+    order : int
+        CRAM approximation order (16 or 48).
+
+    Returns
+    -------
+    numpy.ndarray
+        Final atom numbers.
+
+    """
+    if order not in (16, 48):
+        raise ValueError(f"CRAM order must be 16 or 48, got {order}")
+
+    n = A.shape[0]
+    # Use batch API with n_materials=1, solver_type=1 (decay)
+    dims = np.array([n], dtype=np.int32)
+    nnz_per_mat = np.array([A.indptr[-1]], dtype=np.int32)
+    indptr = np.asarray(A.indptr, dtype=np.int32)
+    indices = np.asarray(A.indices, dtype=np.int32)
+    data = np.asarray(A.data, dtype=np.float64)
+    n0 = np.asarray(n0, dtype=np.float64)
+    result = np.empty(n, dtype=np.float64)
+
+    _dll.openmc_cram_solve_batch(
+        1, dims, indptr, indices, data, nnz_per_mat, n0,
+        dt, order, 1, result)
+
+    return result
+
+
 # --- CRAM batch solve (standalone utility) ---
 
 _dll.openmc_cram_solve_batch.restype = c_int

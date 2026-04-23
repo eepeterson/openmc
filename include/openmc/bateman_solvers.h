@@ -5,6 +5,7 @@
 #define OPENMC_BATEMAN_SOLVERS_H
 
 #include <complex>
+#include <unordered_map>
 
 #include "openmc/memory.h"
 #include "openmc/sparse_matrix.h"
@@ -113,14 +114,15 @@ private:
 //! lower-triangular. After permutation, each CRAM pole requires only
 //! O(nnz) forward substitution instead of a full LU factorization.
 //!
-//! The permutation is provided at construction time and A.permute(perm)
-//! is called at each solve to extract the lower-triangular structure.
+//! The permuted lower-triangular structure (diagonal + off-diagonal CSC)
+//! is precomputed on the DepletionChain at load time and copied into
+//! each solver instance at construction.
 //==============================================================================
 
 class IPFCramDecaySolver : public BatemanSolver {
 public:
   //! Construct a decay solver from a depletion chain.
-  //! Reads the topological permutation from the chain.
+  //! Copies the precomputed permuted lower-triangular structure.
   //! \param order CRAM approximation order
   //! \param chain Depletion chain with precomputed decay DAG properties
   IPFCramDecaySolver(CramOrder order, const DepletionChain& chain);
@@ -136,11 +138,14 @@ private:
   vector<std::complex<double>> theta_;
   double alpha0_;
 
-  // --- Structural data ---
-  vector<int> perm_; //!< Topological permutation
+  // --- Permuted lower-triangular structure (copied from chain) ---
+  vector<int> perm_;            //!< Topological permutation: perm[new] = old
+  vector<double> diag_;         //!< Diagonal values in topo order [n]
+  vector<int> lt_indptr_;       //!< Off-diag column pointers [n+1]
+  vector<int> lt_rowidx_;       //!< Off-diag row indices (permuted)
+  vector<double> lt_data_;      //!< Off-diag values
 
   // --- Workspace (reused across calls) ---
-  vector<double> diag_;            //!< Diagonal values [n]
   vector<std::complex<double>> x_; //!< Complex solve workspace [n]
 };
 
@@ -165,7 +170,8 @@ public:
   IPFCramExpmDecaySolver(CramOrder order, const DepletionChain& chain);
 
   //! Solve by applying cached exp(A*dt) to n0.
-  //! Rebuilds the exponential if dt has changed since the last call.
+  //! Caches matrix exponentials for multiple dt values so that repeated
+  //! time steps (e.g., pulsed irradiation patterns) avoid redundant builds.
   vector<double> solve(
     const CSCMatrix& A, const vector<double>& n0, double dt) override;
 
@@ -189,9 +195,9 @@ private:
   vector<int> reach_indptr_;  //!< Reach column pointers [n+1]
   vector<int> reach_indices_; //!< Reach row indices
 
-  // --- Cached matrix exponential ---
-  CSCMatrix M_;              //!< Cached exp(A*dt)
-  double cached_dt_ {-1.0}; //!< dt used to build M_, or -1 if uncached
+  // --- Cached matrix exponentials (keyed by dt) ---
+  std::unordered_map<double, CSCMatrix> expm_cache_;
+  static constexpr size_t max_cache_size_ {32}; //!< Max cached dt values
 
   // --- Workspace ---
   vector<double> diag_;            //!< Diagonal values [n]

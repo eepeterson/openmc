@@ -1,15 +1,18 @@
 """Chebyshev Rational Approximation Method module
 
 Provides CRAM16 and CRAM48 solvers for use in openmc.deplete, backed by the
-C++ IPFCramSolver implementation.
+C++ IPFCramSolver implementation. Also provides decay-optimized variants
+(CRAM16_decay, CRAM48_decay) that use the IPFCramDecaySolver for pure-decay
+matrices, producing guaranteed non-negative results via forward substitution
+on the topologically sorted lower-triangular decay matrix.
 """
 
 import numpy as np
 
 from .._sparse_compat import csc_array
-from openmc.lib.deplete import cram_solve
+from openmc.lib.deplete import cram_solve, cram_decay_solve
 
-__all__ = ["CRAM16", "CRAM48"]
+__all__ = ["CRAM16", "CRAM48", "CRAM16_decay", "CRAM48_decay"]
 
 
 def _cram_solve(A, n0, dt, order):
@@ -63,3 +66,66 @@ def CRAM16(A, n0, dt):
 
     """
     return _cram_solve(A, n0, dt, order=16)
+
+
+def _cram_decay_solve(A, n0, dt, order):
+    """Single-material decay CRAM solve via C++ IPFCramDecaySolver."""
+    return cram_decay_solve(
+        csc_array(A, dtype=np.float64), np.asarray(n0, dtype=np.float64),
+        float(dt), order=order)
+
+
+def CRAM48_decay(A, n0, dt):
+    """Solve pure-decay equations using 48th order IPF CRAM
+
+    Uses the decay-optimized solver that exploits topological permutation
+    to lower-triangular form for forward substitution, avoiding full LU
+    factorization. Requires a depletion chain to be loaded in C++
+    (via :func:`openmc.lib.deplete.load_depletion_chain`).
+
+    Parameters
+    ----------
+    A : scipy.sparse.csc_array
+        Sparse decay matrix ``A[j, i]`` describing rates at
+        which isotope ``i`` decays to isotope ``j``
+    n0 : numpy.ndarray
+        Initial compositions, typically given in number of atoms in some
+        material or an atom density
+    dt : float
+        Time [s] of the specific interval to be solved
+
+    Returns
+    -------
+    numpy.ndarray
+        Final compositions after ``dt``
+
+    """
+    return _cram_decay_solve(A, n0, dt, order=48)
+
+
+def CRAM16_decay(A, n0, dt):
+    """Solve pure-decay equations using 16th order IPF CRAM
+
+    Uses the decay-optimized solver that exploits topological permutation
+    to lower-triangular form for forward substitution, avoiding full LU
+    factorization. Requires a depletion chain to be loaded in C++
+    (via :func:`openmc.lib.deplete.load_depletion_chain`).
+
+    Parameters
+    ----------
+    A : scipy.sparse.csc_array
+        Sparse decay matrix ``A[j, i]`` describing rates at
+        which isotope ``i`` decays to isotope ``j``
+    n0 : numpy.ndarray
+        Initial compositions, typically given in number of atoms in some
+        material or an atom density
+    dt : float
+        Time [s] of the specific interval to be solved
+
+    Returns
+    -------
+    numpy.ndarray
+        Final compositions after ``dt``
+
+    """
+    return _cram_decay_solve(A, n0, dt, order=16)

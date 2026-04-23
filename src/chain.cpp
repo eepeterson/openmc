@@ -445,6 +445,57 @@ void DepletionChain::build_decay_matrix()
   decay_perm_ = decay_matrix_.pattern().topological_sort();
   decay_matrix_.pattern().reachability(
     decay_perm_, decay_reach_indptr_, decay_reach_indices_);
+
+  // Build permuted lower-triangular structure for the decay solver.
+  // Separates diagonal values and maps off-diagonal row indices into
+  // permuted space so the forward substitution hot loop is indirection-free.
+  {
+    const auto& a_indptr = decay_matrix_.indptr();
+    const auto& a_indices = decay_matrix_.indices();
+    const auto& a_data = decay_matrix_.data();
+
+    // Build inverse permutation
+    vector<int> inv_perm(n);
+    for (int i = 0; i < n; ++i) {
+      inv_perm[decay_perm_[i]] = i;
+    }
+
+    decay_diag_.resize(n);
+    decay_lt_indptr_.resize(n + 1);
+
+    // First pass: count off-diagonal entries per topological column
+    decay_lt_indptr_[0] = 0;
+    for (int j = 0; j < n; ++j) {
+      int orig_col = decay_perm_[j];
+      decay_diag_[j] = 0.0;
+      int count = 0;
+      for (int p = a_indptr[orig_col]; p < a_indptr[orig_col + 1]; ++p) {
+        if (a_indices[p] == orig_col) {
+          decay_diag_[j] = a_data[p];
+        } else {
+          ++count;
+        }
+      }
+      decay_lt_indptr_[j + 1] = decay_lt_indptr_[j] + count;
+    }
+
+    // Second pass: fill off-diagonal arrays
+    int lt_nnz = decay_lt_indptr_[n];
+    decay_lt_rowidx_.resize(lt_nnz);
+    decay_lt_data_.resize(lt_nnz);
+    for (int j = 0; j < n; ++j) {
+      int orig_col = decay_perm_[j];
+      int pos = decay_lt_indptr_[j];
+      for (int p = a_indptr[orig_col]; p < a_indptr[orig_col + 1]; ++p) {
+        int orig_row = a_indices[p];
+        if (orig_row != orig_col) {
+          decay_lt_rowidx_[pos] = inv_perm[orig_row];
+          decay_lt_data_[pos] = a_data[p];
+          ++pos;
+        }
+      }
+    }
+  }
 }
 
 CSCMatrix DepletionChain::form_rxn_matrix(

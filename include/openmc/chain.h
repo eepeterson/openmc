@@ -191,6 +191,16 @@ public:
   const vector<int>& decay_reach_indptr() const { return decay_reach_indptr_; }
   const vector<int>& decay_reach_indices() const { return decay_reach_indices_; }
 
+  //! Permuted lower-triangular decay matrix in separated diagonal + off-diag
+  //! format. Precomputed once during load_xml() for use by the decay forward
+  //! substitution solver. The diagonal array is indexed by topological
+  //! position. The off-diagonal CSC arrays (indptr, rowidx, data) store
+  //! only below-diagonal entries with row indices in permuted space.
+  const vector<double>& decay_diag() const { return decay_diag_; }
+  const vector<int>& decay_lt_indptr() const { return decay_lt_indptr_; }
+  const vector<int>& decay_lt_rowidx() const { return decay_lt_rowidx_; }
+  const vector<double>& decay_lt_data() const { return decay_lt_data_; }
+
   //! Form the reaction-rate portion of the transmutation matrix.
   //!
   //! Builds only the terms that depend on reaction rates: transmutation
@@ -253,6 +263,12 @@ private:
   vector<int> decay_perm_;           //!< Topological permutation of decay DAG
   vector<int> decay_reach_indptr_;   //!< Reachability column pointers [n+1]
   vector<int> decay_reach_indices_;  //!< Reachability row indices
+
+  // Permuted lower-triangular structure (precomputed for decay solver)
+  vector<double> decay_diag_;       //!< Diagonal values in topo order [n]
+  vector<int> decay_lt_indptr_;     //!< Off-diag column pointers [n+1]
+  vector<int> decay_lt_rowidx_;     //!< Off-diag row indices (permuted)
+  vector<double> decay_lt_data_;    //!< Off-diag values
 };
 
 //==============================================================================

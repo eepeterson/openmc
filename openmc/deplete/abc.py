@@ -20,6 +20,7 @@ from warnings import warn
 import numpy as np
 from uncertainties import ufloat
 
+import openmc
 from openmc.checkvalue import check_type, check_greater_than, PathLike
 from openmc.mpi import comm
 from openmc.utility_funcs import change_directory
@@ -692,14 +693,22 @@ class Integrator(ABC):
             if solver == "cram48":
                 from .cram import CRAM48
                 self._solver = CRAM48
+                self._cram_order = 48
             elif solver == "cram16":
                 from .cram import CRAM16
                 self._solver = CRAM16
+                self._cram_order = 16
             else:
                 raise ValueError(
                     f"Solver {solver} not understood. Expected 'cram48' or 'cram16'")
         else:
             self.solver = solver
+            self._cram_order = 48  # default for custom solvers (unused)
+
+        # Set up decay-optimized solver for pure-decay steps (source_rate=0).
+        # This is used automatically in _timed_deplete when all reaction
+        # rates are zero.
+        self._decay_solver = self._init_decay_solver(solver)
 
     @property
     def solver(self):
@@ -730,11 +739,81 @@ class Integrator(ABC):
                     f"Keyword arguments like {ix} at position {param} are not allowed")
 
         self._solver = func
+        # Custom solver; disable auto-dispatch to decay solver
+        self._decay_solver = None
+
+    def _init_decay_solver(self, solver):
+        """Initialize the decay-optimized solver if possible.
+
+        Loads the depletion chain into the C++ library and returns the
+        corresponding decay solver function. Returns ``None`` if the decay
+        solver cannot be initialized (e.g., chain file path not available,
+        custom solver function, or C++ library not available).
+
+        Parameters
+        ----------
+        solver : str or callable
+            Solver specification passed to the Integrator constructor.
+
+        Returns
+        -------
+        callable or None
+            Decay solver function with signature ``(A, n0, dt) -> n1``,
+            or ``None`` if not available.
+
+        """
+        if not isinstance(solver, str) or solver not in ("cram48", "cram16"):
+            return None
+
+        # Find the chain XML file path. The chain must match the operator's
+        # chain (same nuclides in same order). Prefer _xml_path which is set
+        # when Chain.from_xml() is called. If the chain was produced by
+        # reduce() or other means, _xml_path won't be set; in that case
+        # export to a temporary file so the C++ library can load it.
+        chain_path = getattr(self.chain, '_xml_path', None)
+        if chain_path is not None:
+            # Verify the file's chain size matches the operator chain
+            try:
+                from openmc.deplete import Chain as _Chain
+                file_chain = _Chain.from_xml(chain_path)
+                if len(file_chain.nuclides) != len(self.chain.nuclides):
+                    chain_path = None
+            except Exception:
+                chain_path = None
+
+        if chain_path is None:
+            # Export the operator's chain to a temporary file
+            import tempfile
+            try:
+                self._decay_chain_tmpfile = tempfile.NamedTemporaryFile(
+                    suffix='.xml', delete=False)
+                self.chain.export_to_xml(self._decay_chain_tmpfile.name)
+                chain_path = self._decay_chain_tmpfile.name
+            except Exception:
+                return None
+
+        try:
+            from openmc.lib.deplete import load_depletion_chain
+            load_depletion_chain(chain_path)
+        except Exception:
+            return None
+
+        if solver == "cram48":
+            from .cram import CRAM48_decay
+            return CRAM48_decay
+        else:
+            from .cram import CRAM16_decay
+            return CRAM16_decay
 
     def _timed_deplete(self, n, rates, dt, i=None, matrix_func=None):
         start = time.time()
+        # Use decay solver when all reaction rates are zero
+        if self._decay_solver is not None and not np.any(rates):
+            solver = self._decay_solver
+        else:
+            solver = self._solver
         results = deplete(
-            self._solver, self.chain, n, rates, dt, i, matrix_func,
+            solver, self.chain, n, rates, dt, i, matrix_func,
             self.transfer_rates, self.external_source_rates)
         return time.time() - start, results
 

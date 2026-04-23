@@ -463,7 +463,11 @@ void extract_diagonal(const CSCMatrix& PA, vector<double>& diag)
 
 IPFCramDecaySolver::IPFCramDecaySolver(
   CramOrder order, const DepletionChain& chain)
-  : perm_(chain.decay_perm())
+  : perm_(chain.decay_perm()),
+    diag_(chain.decay_diag()),
+    lt_indptr_(chain.decay_lt_indptr()),
+    lt_rowidx_(chain.decay_lt_rowidx()),
+    lt_data_(chain.decay_lt_data())
 {
   init_cram_coefficients(order, n_poles_, alpha_, theta_, alpha0_);
 }
@@ -472,8 +476,10 @@ IPFCramDecaySolver::IPFCramDecaySolver(
 // IPFCramDecaySolver::solve
 //
 // Optimized CRAM solver for pure-decay (lower-triangular) matrices.
-// Permutes A to lower-triangular form, extracts diagonal, then performs
-// forward substitution for each CRAM pole.
+// Uses the precomputed permuted lower-triangular CSC structure (diagonal
+// separated, row indices in permuted space) copied from the chain at
+// construction time. The CRAM iteration fuses forward-substitution and
+// accumulation into a single pass per pole for minimal memory traffic.
 //==============================================================================
 
 vector<double> IPFCramDecaySolver::solve(
@@ -481,52 +487,39 @@ vector<double> IPFCramDecaySolver::solve(
 {
   int n = A.n();
 
-  // Permute A to lower-triangular form
-  CSCMatrix PA = A.permute(perm_);
-  const auto& pa_indptr = PA.indptr();
-  const auto& pa_indices = PA.indices();
-  const auto& pa_data = PA.data();
-
-  // Extract diagonal
-  extract_diagonal(PA, diag_);
-
   // Permute n0 into topological order
   vector<double> y(n);
   for (int i = 0; i < n; ++i) {
     y[i] = n0[perm_[i]];
   }
 
-  // IPF CRAM iteration in permuted space
+  // IPF CRAM iteration with fused forward-sub/accumulate
   x_.resize(n);
   for (int p = 0; p < n_poles_; ++p) {
+    auto alpha_p = alpha_[p];
     auto theta_p = theta_[p];
 
-    // Copy permuted y into complex RHS
+    // Initialize x from y
     for (int j = 0; j < n; ++j) {
       x_[j] = std::complex<double>(y[j], 0.0);
     }
 
-    // Forward substitution on (A'*dt - theta*I) x = y
+    // Forward substitution on (PA*dt - theta*I) x = y
+    // with fused accumulate: y[j] is updated as soon as x[j] is final
     for (int j = 0; j < n; ++j) {
+      // Diagonal solve — x[j] is now final
       x_[j] = fast_cmul(x_[j],
         fast_crecip({diag_[j] * dt - theta_p.real(), -theta_p.imag()}));
 
-      // Iterate off-diagonal entries (skip diagonal at position indptr[j])
-      int start = pa_indptr[j];
-      int end = pa_indptr[j + 1];
-      if (start < end && pa_indices[start] == j)
-        ++start;
-      for (int lp = start; lp < end; ++lp) {
-        double a_val = pa_data[lp] * dt;
-        x_[pa_indices[lp]] -=
+      // Accumulate immediately (x[j] won't change again)
+      y[j] += 2.0 * fast_cmul(alpha_p, x_[j]).real();
+
+      // Scatter off-diagonal contributions to later rows
+      for (int lp = lt_indptr_[j]; lp < lt_indptr_[j + 1]; ++lp) {
+        double a_val = lt_data_[lp] * dt;
+        x_[lt_rowidx_[lp]] -=
           std::complex<double>(a_val * x_[j].real(), a_val * x_[j].imag());
       }
-    }
-
-    // y += 2 * Re(alpha_p * x_p)
-    for (int i = 0; i < n; ++i) {
-      auto ax = fast_cmul(alpha_[p], x_[i]);
-      y[i] += 2.0 * ax.real();
     }
   }
 
@@ -562,17 +555,23 @@ IPFCramExpmDecaySolver::IPFCramExpmDecaySolver(
 vector<double> IPFCramExpmDecaySolver::solve(
   const CSCMatrix& A, const vector<double>& n0, double dt)
 {
-  // Rebuild exponential if dt changed
-  if (dt != cached_dt_) {
-    M_ = build_expm(A, dt);
-    cached_dt_ = dt;
+  // Look up or build the matrix exponential for this dt
+  auto it = expm_cache_.find(dt);
+  if (it == expm_cache_.end()) {
+    // Evict entire cache if it gets too large (simple policy)
+    if (expm_cache_.size() >= max_cache_size_) {
+      expm_cache_.clear();
+    }
+    auto [ins_it, inserted] = expm_cache_.emplace(dt, build_expm(A, dt));
+    it = ins_it;
   }
+  const CSCMatrix& M = it->second;
 
-  // Sparse CSC matrix-vector multiply: result = M_ * n0
-  int n = M_.n();
-  const auto& indptr = M_.indptr();
-  const auto& indices = M_.indices();
-  const auto& data = M_.data();
+  // Sparse CSC matrix-vector multiply: result = M * n0
+  int n = M.n();
+  const auto& indptr = M.indptr();
+  const auto& indices = M.indices();
+  const auto& data = M.data();
 
   vector<double> result(n, 0.0);
   for (int j = 0; j < n; ++j) {
