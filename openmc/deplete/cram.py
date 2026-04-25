@@ -13,14 +13,18 @@ from .._sparse_compat import csc_array
 __all__ = ["CRAM16", "CRAM48"]
 
 
-def _cram_solve(A, n0, dt, order, substeps=1):
+def _cram_solve(A, n0, dt, order, substeps=1, is_decay=False):
     """Single-material CRAM solve via the C++ ``IPFCramSolver`` backend."""
+    if is_decay:
+        return cram_solve(
+            None, np.asarray(n0, dtype=np.float64),
+            float(dt), order=order, substeps=substeps, is_decay=True)
     return cram_solve(
         csc_array(A, dtype=np.float64), np.asarray(n0, dtype=np.float64),
         float(dt), order=order, substeps=substeps)
 
 
-def CRAM48(A, n0, dt, substeps=1):
+def CRAM48(A, n0, dt, substeps=1, is_decay=False):
     r"""Solve depletion equations using 48th order IPF CRAM.
 
     Implements the Incomplete Partial Fraction form of the Chebyshev
@@ -52,10 +56,10 @@ def CRAM48(A, n0, dt, substeps=1):
         Final compositions after ``dt``.
 
     """
-    return _cram_solve(A, n0, dt, order=48, substeps=substeps)
+    return _cram_solve(A, n0, dt, order=48, substeps=substeps, is_decay=is_decay)
 
 
-def CRAM16(A, n0, dt, substeps=1):
+def CRAM16(A, n0, dt, substeps=1, is_decay=False):
     r"""Solve depletion equations using 16th order IPF CRAM.
 
     See :func:`CRAM48` for a description of the method and substep behavior.
@@ -79,4 +83,4 @@ def CRAM16(A, n0, dt, substeps=1):
         Final compositions after ``dt``.
 
     """
-    return _cram_solve(A, n0, dt, order=16, substeps=substeps)
+    return _cram_solve(A, n0, dt, order=16, substeps=substeps, is_decay=is_decay)

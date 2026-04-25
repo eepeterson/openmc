@@ -13,6 +13,7 @@ from inspect import signature
 from numbers import Real, Integral
 from pathlib import Path
 from textwrap import dedent
+import os
 import time
 from typing import Optional, Union, Sequence
 from warnings import warn
@@ -152,6 +153,20 @@ class TransportOperator(ABC):
 
         # Read depletion chain
         self.chain = _get_chain(chain_file, fission_q)
+
+        # Preserve the chain XML path so the C++ runtime can load it on
+        # demand (e.g. for the pure-decay CRAM solver).
+        if isinstance(chain_file, (str, os.PathLike)):
+            self.chain_file = os.fspath(chain_file)
+        else:
+            # When chain_file is None, _get_chain resolved it from
+            # openmc.config; when it's a Chain instance the path may be
+            # carried on the object itself.
+            import openmc as _openmc
+            cfg_path = _openmc.config.get('chain_file')
+            self.chain_file = (
+                os.fspath(cfg_path) if cfg_path is not None
+                else getattr(self.chain, 'file_path', None))
 
         if prev_results is None:
             self.prev_res = None
@@ -757,8 +772,15 @@ class Integrator(ABC):
 
     def _timed_deplete(self, n, rates, dt, i=None, matrix_func=None):
         start = time.time()
+        is_decay = bool(getattr(self, '_pure_decay_step', False))
+        if is_decay:
+            self._ensure_decay_chain_loaded()
+            from functools import partial
+            solver = partial(self._solver, is_decay=True)
+        else:
+            solver = self._solver
         results = deplete(
-            self._solver, self.chain, n, rates, dt, i, matrix_func,
+            solver, self.chain, n, rates, dt, i, matrix_func,
             self.transfer_rates, self.external_source_rates, self.substeps)
 
         # Clip unphysical negative number densities
@@ -766,6 +788,26 @@ class Integrator(ABC):
             r.clip(min=0.0, out=r)
 
         return time.time() - start, results
+
+    def _ensure_decay_chain_loaded(self):
+        """Lazy-load the depletion chain into the C++ runtime.
+
+        The C++ ``IPFCramDecaySolver`` requires ``data::depletion_chain`` to be
+        populated. We avoid loading until the first pure-decay step is hit.
+        """
+        if getattr(self, '_decay_chain_loaded', False):
+            return
+        chain_path = getattr(self.operator, 'chain_file', None) \
+            if hasattr(self, 'operator') else None
+        if chain_path is None:
+            chain_path = getattr(self.chain, 'file_path', None)
+        if chain_path is None:
+            raise RuntimeError(
+                "Pure-decay timestep requested but the depletion chain XML "
+                "path is unknown; cannot load it into the C++ runtime.")
+        from openmc.lib.deplete import load_depletion_chain
+        load_depletion_chain(chain_path)
+        self._decay_chain_loaded = True
 
     @abstractmethod
     def __call__(
@@ -941,6 +983,7 @@ class Integrator(ABC):
                 n, res, keff_search_root = self._get_bos_data(i, source_rate, n)
 
                 # Solve Bateman equations over time interval
+                self._pure_decay_step = (source_rate == 0.0)
                 proc_time, n_end = self(n, res.rates, dt, source_rate, i)
 
                 StepResult.save(
