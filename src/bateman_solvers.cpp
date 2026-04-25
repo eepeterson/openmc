@@ -3,9 +3,12 @@
 
 #include "openmc/bateman_solvers.h"
 
+#include <algorithm> // for sort
 #include <complex>
+#include <numeric>   // for iota
 
 #include "openmc/capi.h"
+#include "openmc/chain.h"
 #include "openmc/error.h"
 
 namespace openmc {
@@ -335,6 +338,314 @@ vector<double> IPFCramSolver::solve(
 
   return y;
 }
+
+//==============================================================================
+// IPFCramDecaySolver implementation
+//==============================================================================
+
+IPFCramDecaySolver::IPFCramDecaySolver(
+  const DepletionChain& chain, int order)
+  : chain_(chain),
+    perm_(chain.decay_perm()),
+    diag_(chain.decay_diag()),
+    lt_indptr_(chain.decay_lt_indptr()),
+    lt_rowidx_(chain.decay_lt_rowidx()),
+    lt_data_(chain.decay_lt_data()),
+    reach_indptr_(chain.decay_reach_indptr()),
+    reach_indices_(chain.decay_reach_indices())
+{
+  if (order == 16) {
+    n_poles_ = 8;
+    alpha_ = cram16_alpha;
+    theta_ = cram16_theta;
+    alpha0_ = cram16_alpha0;
+  } else if (order == 48) {
+    n_poles_ = 24;
+    alpha_ = cram48_alpha;
+    theta_ = cram48_theta;
+    alpha0_ = cram48_alpha0;
+  } else {
+    throw std::invalid_argument {
+      fmt::format("CRAM order must be 16 or 48, got {}.", order)};
+  }
+}
+
+vector<double> IPFCramDecaySolver::solve_step(
+  const vector<double>& n0, double dt) const
+{
+  int n = chain_.size();
+
+  // Permute n0 into topological order: y[topo_idx] = n0[orig_idx].
+  vector<double> y(n);
+  for (int i = 0; i < n; ++i) {
+    y[i] = n0[perm_[i]];
+  }
+
+  // Each pole solve fuses forward substitution and accumulation into a
+  // single pass over the precomputed permuted lower-triangular structure.
+  vector<std::complex<double>> x(n);
+  for (int p = 0; p < n_poles_; ++p) {
+    auto alpha_p = alpha_[p];
+    auto theta_p = theta_[p];
+
+    for (int j = 0; j < n; ++j) {
+      x[j] = std::complex<double>(y[j], 0.0);
+    }
+
+    for (int j = 0; j < n; ++j) {
+      // Diagonal solve: x[j] /= (diag*dt - theta).
+      x[j] = fast_cmul(x[j], fast_crecip(std::complex<double> {
+                                diag_[j] * dt - theta_p.real(),
+                                -theta_p.imag()}));
+
+      // Accumulate immediately — x[j] won't change again for this pole.
+      y[j] += 2.0 * fast_cmul(alpha_p, x[j]).real();
+
+      // Scatter contributions to later rows.
+      for (int lp = lt_indptr_[j]; lp < lt_indptr_[j + 1]; ++lp) {
+        double a = lt_data_[lp] * dt;
+        x[lt_rowidx_[lp]] -=
+          std::complex<double>(a * x[j].real(), a * x[j].imag());
+      }
+    }
+  }
+
+  // Scale by alpha0 and unpermute.
+  vector<double> result(n);
+  for (int i = 0; i < n; ++i) {
+    result[perm_[i]] = y[i] * alpha0_;
+  }
+  return result;
+}
+
+CSCMatrix IPFCramDecaySolver::build_expm(double dt_sub) const
+{
+  int n = chain_.size();
+  const int* reach_indptr = reach_indptr_.data();
+  const int* reach_indices = reach_indices_.data();
+
+  // Compressed M storage: column j stores M[j,j] followed by entries for
+  // each row in reach[j]. Total size = n + reach_indptr[n].
+  int total = n + reach_indptr[n];
+  vector<double> M_vals(total, 0.0);
+
+  // Initialize M = I (only diagonal entries).
+  for (int j = 0; j < n; ++j) {
+    M_vals[j + reach_indptr[j]] = 1.0;
+  }
+
+  vector<std::complex<double>> x(n, std::complex<double> {0.0, 0.0});
+
+  // IPF iteration: for each pole, run column-by-column forward substitution
+  // restricted to {j} ∪ reach[j].
+  for (int p = 0; p < n_poles_; ++p) {
+    auto theta_p = theta_[p];
+    auto alpha_p = alpha_[p];
+
+    for (int j = 0; j < n; ++j) {
+      int off = j + reach_indptr[j];
+      int roff = reach_indptr[j];
+      int rlen = reach_indptr[j + 1] - roff;
+
+      // Scatter compressed M column into dense complex workspace.
+      x[j] = {M_vals[off], 0.0};
+      for (int k = 0; k < rlen; ++k) {
+        x[reach_indices[roff + k]] = {M_vals[off + 1 + k], 0.0};
+      }
+
+      // Forward substitution over {j} ∪ reach[j]. Process j first.
+      x[j] = fast_cmul(x[j], fast_crecip(std::complex<double> {
+                               diag_[j] * dt_sub - theta_p.real(),
+                               -theta_p.imag()}));
+      for (int lp = lt_indptr_[j]; lp < lt_indptr_[j + 1]; ++lp) {
+        double a = lt_data_[lp] * dt_sub;
+        x[lt_rowidx_[lp]] -=
+          std::complex<double>(a * x[j].real(), a * x[j].imag());
+      }
+      for (int ki = 0; ki < rlen; ++ki) {
+        int c = reach_indices[roff + ki];
+        x[c] = fast_cmul(x[c], fast_crecip(std::complex<double> {
+                                 diag_[c] * dt_sub - theta_p.real(),
+                                 -theta_p.imag()}));
+        for (int lp = lt_indptr_[c]; lp < lt_indptr_[c + 1]; ++lp) {
+          double a = lt_data_[lp] * dt_sub;
+          x[lt_rowidx_[lp]] -=
+            std::complex<double>(a * x[c].real(), a * x[c].imag());
+        }
+      }
+
+      // Gather and accumulate: M[:,j] += 2 * Re(alpha * x). Clear workspace.
+      auto ax = fast_cmul(alpha_p, x[j]);
+      M_vals[off] += 2.0 * ax.real();
+      x[j] = {0.0, 0.0};
+      for (int k = 0; k < rlen; ++k) {
+        int r = reach_indices[roff + k];
+        ax = fast_cmul(alpha_p, x[r]);
+        M_vals[off + 1 + k] += 2.0 * ax.real();
+        x[r] = {0.0, 0.0};
+      }
+    }
+  }
+
+  // Build CSC output in original (unpermuted) column space, scaling by
+  // alpha0 and dropping non-positive values (Metzler-matrix exponentials
+  // have non-negative entries; negatives are CRAM artifacts).
+  vector<int> out_indptr(n + 1, 0);
+  for (int j = 0; j < n; ++j) {
+    int orig_col = perm_[j];
+    int off = j + reach_indptr[j];
+    int rlen = reach_indptr[j + 1] - reach_indptr[j];
+    if (M_vals[off] * alpha0_ > 0.0)
+      ++out_indptr[orig_col + 1];
+    for (int k = 0; k < rlen; ++k) {
+      if (M_vals[off + 1 + k] * alpha0_ > 0.0)
+        ++out_indptr[orig_col + 1];
+    }
+  }
+  for (int c = 0; c < n; ++c) {
+    out_indptr[c + 1] += out_indptr[c];
+  }
+
+  int out_nnz = out_indptr[n];
+  vector<int> out_indices(out_nnz);
+  vector<double> out_data(out_nnz);
+
+  vector<int> col_pos(n, 0);
+  for (int j = 0; j < n; ++j) {
+    int orig_col = perm_[j];
+    int off = j + reach_indptr[j];
+    int roff = reach_indptr[j];
+    int rlen = reach_indptr[j + 1] - roff;
+    int base = out_indptr[orig_col];
+
+    double v = M_vals[off] * alpha0_;
+    if (v > 0.0) {
+      int pos = base + col_pos[orig_col]++;
+      out_indices[pos] = orig_col;
+      out_data[pos] = v;
+    }
+    for (int k = 0; k < rlen; ++k) {
+      v = M_vals[off + 1 + k] * alpha0_;
+      if (v > 0.0) {
+        int pos = base + col_pos[orig_col]++;
+        out_indices[pos] = perm_[reach_indices[roff + k]];
+        out_data[pos] = v;
+      }
+    }
+  }
+
+  // Sort row indices within each column. Insertion sort for short columns,
+  // index-permutation sort for longer ones.
+  for (int c = 0; c < n; ++c) {
+    int start = out_indptr[c];
+    int end = out_indptr[c + 1];
+    int len = end - start;
+    if (len <= 1)
+      continue;
+    if (len <= 16) {
+      for (int i = start + 1; i < end; ++i) {
+        int row = out_indices[i];
+        double val = out_data[i];
+        int j = i - 1;
+        while (j >= start && out_indices[j] > row) {
+          out_indices[j + 1] = out_indices[j];
+          out_data[j + 1] = out_data[j];
+          --j;
+        }
+        out_indices[j + 1] = row;
+        out_data[j + 1] = val;
+      }
+    } else {
+      vector<int> order(len);
+      std::iota(order.begin(), order.end(), 0);
+      std::sort(order.begin(), order.end(), [&](int a, int b) {
+        return out_indices[start + a] < out_indices[start + b];
+      });
+      vector<int> tmp_idx(len);
+      vector<double> tmp_val(len);
+      for (int i = 0; i < len; ++i) {
+        tmp_idx[i] = out_indices[start + order[i]];
+        tmp_val[i] = out_data[start + order[i]];
+      }
+      std::copy(tmp_idx.begin(), tmp_idx.end(), out_indices.begin() + start);
+      std::copy(tmp_val.begin(), tmp_val.end(), out_data.begin() + start);
+    }
+  }
+
+  CSCPattern pattern(n, std::move(out_indptr), std::move(out_indices));
+  return CSCMatrix(std::move(pattern), std::move(out_data));
+}
+
+vector<double> IPFCramDecaySolver::apply_expm(
+  const CSCMatrix& M, const vector<double>& n0)
+{
+  int n = M.n();
+  const auto& indptr = M.indptr();
+  const auto& indices = M.indices();
+  const auto& data = M.data();
+
+  vector<double> result(n, 0.0);
+  for (int j = 0; j < n; ++j) {
+    double xj = n0[j];
+    if (xj == 0.0)
+      continue;
+    for (int p = indptr[j]; p < indptr[j + 1]; ++p) {
+      result[indices[p]] += data[p] * xj;
+    }
+  }
+  return result;
+}
+
+const CSCMatrix& IPFCramDecaySolver::cached_expm(double dt_sub)
+{
+  for (auto it = expm_cache_.begin(); it != expm_cache_.end(); ++it) {
+    if (it->dt_sub == dt_sub) {
+      // Move-to-front for LRU.
+      ExpmEntry hit = std::move(*it);
+      expm_cache_.erase(it);
+      expm_cache_.insert(expm_cache_.begin(), std::move(hit));
+      return expm_cache_.front().M;
+    }
+  }
+  if (static_cast<int>(expm_cache_.size()) >= max_cache_size_) {
+    expm_cache_.pop_back();
+  }
+  expm_cache_.insert(
+    expm_cache_.begin(), ExpmEntry {dt_sub, build_expm(dt_sub)});
+  return expm_cache_.front().M;
+}
+
+vector<double> IPFCramDecaySolver::solve(
+  const CSCMatrix& A, const vector<double>& n0, double dt, int substeps)
+{
+  if (substeps <= 0) {
+    throw std::invalid_argument {
+      fmt::format("substeps must be positive, got {}.", substeps)};
+  }
+  int n = chain_.size();
+  if (static_cast<int>(n0.size()) != n) {
+    throw std::invalid_argument {
+      fmt::format("IPFCramDecaySolver: n0 size ({}) != chain size ({}).",
+        n0.size(), n)};
+  }
+  // A is intentionally ignored (the chain owns the cached decay matrix).
+  (void)A;
+
+  if (substeps == 1) {
+    return solve_step(n0, dt);
+  }
+
+  // Build/lookup M = exp(decay * dt/substeps), then apply substeps times.
+  double dt_sub = dt / substeps;
+  const CSCMatrix& M = cached_expm(dt_sub);
+
+  vector<double> y = n0;
+  for (int s = 0; s < substeps; ++s) {
+    y = apply_expm(M, y);
+  }
+  return y;
+}
+
 } // namespace openmc
 
 //==============================================================================

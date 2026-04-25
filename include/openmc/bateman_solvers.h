@@ -99,6 +99,77 @@ private:
   double alpha0_;                             //!< Limit at infinity
 };
 
+class DepletionChain;
+
+//==============================================================================
+//! IPF CRAM solver specialized for pure-decay (acyclic) matrices
+//!
+//! When the depletion matrix has no transmutation rates (source rate = 0),
+//! the dependency graph between nuclides is a directed acyclic graph and the
+//! matrix can be permuted into strictly lower-triangular form. This solver
+//! exploits that structure in two ways:
+//!
+//! - For substeps == 1, each CRAM pole solve fuses forward substitution and
+//!   accumulation into a single pass over the precomputed permuted lower-
+//!   triangular structure stored on the chain.
+//! - For substeps > 1, the matrix exponential M = exp(A * dt/substeps) is
+//!   built once column-by-column via CRAM (exploiting precomputed reachability
+//!   to keep each column solve sparse) and applied substeps times via
+//!   sparse matrix-vector multiply.
+//==============================================================================
+
+class IPFCramDecaySolver : public BatemanSolver {
+public:
+  IPFCramDecaySolver(const DepletionChain& chain, int order = 48);
+
+  //! Solve the decay Bateman equations.
+  //! \param A   Ignored: the chain owns the cached decay matrix. Its pattern
+  //!            is asserted to match in debug builds; the argument exists for
+  //!            BatemanSolver polymorphism.
+  vector<double> solve(
+    const CSCMatrix& A, const vector<double>& n0, double dt,
+    int substeps = 1) override;
+
+private:
+  //! Per-step solve via fused forward-sub/accumulate (one pass per pole).
+  vector<double> solve_step(const vector<double>& n0, double dt) const;
+
+  //! Build M = exp(decay * dt_sub) using CRAM column-by-column, exploiting
+  //! the chain's reachability arrays.
+  CSCMatrix build_expm(double dt_sub) const;
+
+  //! Apply a cached expm matrix M to n0 (sparse SpMV).
+  static vector<double> apply_expm(
+    const CSCMatrix& M, const vector<double>& n0);
+
+  //! Look up M = exp(decay * dt_sub) in the LRU cache, building if missing.
+  const CSCMatrix& cached_expm(double dt_sub);
+
+  // Chain references (chain owns these)
+  const DepletionChain& chain_;
+  const vector<int>& perm_;
+  const vector<double>& diag_;
+  const vector<int>& lt_indptr_;
+  const vector<int>& lt_rowidx_;
+  const vector<double>& lt_data_;
+  const vector<int>& reach_indptr_;
+  const vector<int>& reach_indices_;
+
+  // CRAM coefficients
+  int n_poles_;
+  const std::complex<double>* alpha_;
+  const std::complex<double>* theta_;
+  double alpha0_;
+
+  // LRU expm cache (small linear scan; capacity 4)
+  struct ExpmEntry {
+    double dt_sub;
+    CSCMatrix M;
+  };
+  vector<ExpmEntry> expm_cache_;
+  static constexpr int max_cache_size_ = 4;
+};
+
 } // namespace openmc
 
 #endif // OPENMC_BATEMAN_SOLVERS_H
