@@ -4,6 +4,8 @@
 #include "openmc/sparse_matrix.h"
 
 #include <algorithm>
+#include <iterator>  // for back_inserter
+#include <numeric>   // for iota
 #include <stdexcept>
 
 #include <fmt/core.h>
@@ -51,6 +53,16 @@ CSCPattern::CSCPattern(int n, vector<int> indptr, vector<int> indices)
 //==============================================================================
 // CSCMatrix implementation
 //==============================================================================
+
+CSCMatrix::CSCMatrix(CSCPattern pattern, vector<double> data)
+  : pattern_(std::move(pattern)), data_(std::move(data))
+{
+  if (static_cast<int>(data_.size()) != pattern_.nnz()) {
+    throw std::invalid_argument {
+      fmt::format("CSCMatrix: data size ({}) != pattern nnz ({})",
+        data_.size(), pattern_.nnz())};
+  }
+}
 
 CSCMatrix::CSCMatrix(
   int n, vector<int> indptr, vector<int> indices, vector<double> data)
@@ -188,6 +200,293 @@ SymbolicLUFactorization symbolic_factorize(CSCPattern pattern)
   return {std::move(pattern),
     CSCPattern(n, std::move(l_indptr), std::move(l_rowidx)),
     CSCPattern(n, std::move(u_indptr), std::move(u_rowidx))};
+}
+
+//==============================================================================
+// CSCPattern: from_triplets, topological_sort, reachability
+//==============================================================================
+
+CSCPattern CSCPattern::from_triplets(
+  int n, const vector<int>& rows, const vector<int>& cols)
+{
+  if (rows.size() != cols.size()) {
+    throw std::invalid_argument {fmt::format(
+      "CSCPattern::from_triplets: rows.size ({}) != cols.size ({})",
+      rows.size(), cols.size())};
+  }
+  int nt = static_cast<int>(rows.size());
+
+  // Sort triplets by (col, row).
+  vector<int> order(nt);
+  std::iota(order.begin(), order.end(), 0);
+  std::sort(order.begin(), order.end(), [&](int a, int b) {
+    return cols[a] < cols[b] || (cols[a] == cols[b] && rows[a] < rows[b]);
+  });
+
+  // Build CSC arrays, collapsing duplicate (row, col) pairs.
+  vector<int> indptr(n + 1, 0);
+  vector<int> indices;
+  indices.reserve(nt);
+
+  int prev_col = -1;
+  int prev_row = -1;
+  for (int k = 0; k < nt; ++k) {
+    int i = rows[order[k]];
+    int j = cols[order[k]];
+    if (i < 0 || i >= n || j < 0 || j >= n) {
+      throw std::invalid_argument {
+        fmt::format("CSCPattern::from_triplets: index ({}, {}) out of "
+                    "bounds for n={}", i, j, n)};
+    }
+    if (j == prev_col && i == prev_row)
+      continue;
+
+    indices.push_back(i);
+    for (int c = prev_col + 1; c <= j; ++c) {
+      indptr[c] = static_cast<int>(indices.size()) - 1;
+    }
+    prev_col = j;
+    prev_row = i;
+  }
+  for (int c = prev_col + 1; c <= n; ++c) {
+    indptr[c] = static_cast<int>(indices.size());
+  }
+
+  return CSCPattern(n, std::move(indptr), std::move(indices));
+}
+
+vector<int> CSCPattern::topological_sort() const
+{
+  // Build in-degree count from off-diagonal entries.
+  // Graph edge: col -> row for each off-diagonal (row, col) entry.
+  vector<int> in_degree(n_, 0);
+  for (int col = 0; col < n_; ++col) {
+    for (int p = indptr_[col]; p < indptr_[col + 1]; ++p) {
+      int row = indices_[p];
+      if (row != col) {
+        ++in_degree[row];
+      }
+    }
+  }
+
+  // Use a min-heap of zero-in-degree nodes for deterministic ordering.
+  vector<int> queue;
+  for (int i = 0; i < n_; ++i) {
+    if (in_degree[i] == 0) {
+      queue.push_back(i);
+    }
+  }
+  std::make_heap(queue.begin(), queue.end(), std::greater<int>());
+
+  vector<int> perm;
+  perm.reserve(n_);
+
+  while (!queue.empty()) {
+    std::pop_heap(queue.begin(), queue.end(), std::greater<int>());
+    int node = queue.back();
+    queue.pop_back();
+    perm.push_back(node);
+
+    for (int p = indptr_[node]; p < indptr_[node + 1]; ++p) {
+      int row = indices_[p];
+      if (row != node && --in_degree[row] == 0) {
+        queue.push_back(row);
+        std::push_heap(queue.begin(), queue.end(), std::greater<int>());
+      }
+    }
+  }
+
+  if (static_cast<int>(perm.size()) != n_) {
+    throw std::invalid_argument {fmt::format(
+      "CSCPattern::topological_sort: graph contains a cycle "
+      "({} of {} nodes processed)", perm.size(), n_)};
+  }
+  return perm;
+}
+
+void CSCPattern::reachability(const vector<int>& perm,
+  vector<int>& reach_indptr, vector<int>& reach_indices) const
+{
+  if (static_cast<int>(perm.size()) != n_) {
+    throw std::invalid_argument {fmt::format(
+      "CSCPattern::reachability: perm size ({}) != n ({})", perm.size(), n_)};
+  }
+
+  // Inverse permutation: inv_perm[old_idx] = new_idx.
+  vector<int> inv_perm(n_);
+  for (int i = 0; i < n_; ++i) {
+    inv_perm[perm[i]] = i;
+  }
+
+  // Build off-diagonal lower-triangular column structure in permuted space.
+  vector<int> lt_indptr(n_ + 1, 0);
+  for (int old_col = 0; old_col < n_; ++old_col) {
+    int new_col = inv_perm[old_col];
+    for (int p = indptr_[old_col]; p < indptr_[old_col + 1]; ++p) {
+      int new_row = inv_perm[indices_[p]];
+      if (new_row != new_col) {
+        ++lt_indptr[new_col + 1];
+      }
+    }
+  }
+  for (int j = 0; j < n_; ++j) {
+    lt_indptr[j + 1] += lt_indptr[j];
+  }
+
+  int lt_nnz = lt_indptr[n_];
+  vector<int> lt_rowidx(lt_nnz);
+  vector<int> col_pos(n_, 0);
+  for (int old_col = 0; old_col < n_; ++old_col) {
+    int new_col = inv_perm[old_col];
+    for (int p = indptr_[old_col]; p < indptr_[old_col + 1]; ++p) {
+      int new_row = inv_perm[indices_[p]];
+      if (new_row != new_col) {
+        lt_rowidx[lt_indptr[new_col] + col_pos[new_col]++] = new_row;
+      }
+    }
+  }
+  for (int j = 0; j < n_; ++j) {
+    std::sort(lt_rowidx.begin() + lt_indptr[j],
+      lt_rowidx.begin() + lt_indptr[j + 1]);
+  }
+
+  // Memoized transitive closure walked leaves-first. reach[j] is the sorted
+  // list of permuted indices reachable from j (excluding j itself).
+  vector<vector<int>> reach(n_);
+  vector<int> merge_buf;
+
+  for (int j = n_ - 1; j >= 0; --j) {
+    int n_children = lt_indptr[j + 1] - lt_indptr[j];
+    if (n_children == 0)
+      continue;
+
+    if (n_children == 1) {
+      int c = lt_rowidx[lt_indptr[j]];
+      auto& rc = reach[c];
+      reach[j].resize(1 + rc.size());
+      auto it = std::lower_bound(rc.begin(), rc.end(), c);
+      auto pos = it - rc.begin();
+      std::copy(rc.begin(), it, reach[j].begin());
+      reach[j][pos] = c;
+      std::copy(it, rc.end(), reach[j].begin() + pos + 1);
+    } else {
+      int c0 = lt_rowidx[lt_indptr[j]];
+      auto& rc0 = reach[c0];
+      merge_buf.clear();
+      merge_buf.reserve(rc0.size() + 1);
+      auto it0 = std::lower_bound(rc0.begin(), rc0.end(), c0);
+      merge_buf.insert(merge_buf.end(), rc0.begin(), it0);
+      merge_buf.push_back(c0);
+      merge_buf.insert(merge_buf.end(), it0, rc0.end());
+
+      for (int lp = lt_indptr[j] + 1; lp < lt_indptr[j + 1]; ++lp) {
+        int c = lt_rowidx[lp];
+        auto& rc = reach[c];
+        vector<int> child_set;
+        child_set.reserve(rc.size() + 1);
+        auto itc = std::lower_bound(rc.begin(), rc.end(), c);
+        child_set.insert(child_set.end(), rc.begin(), itc);
+        child_set.push_back(c);
+        child_set.insert(child_set.end(), itc, rc.end());
+
+        vector<int> merged;
+        merged.reserve(merge_buf.size() + child_set.size());
+        std::set_union(merge_buf.begin(), merge_buf.end(), child_set.begin(),
+          child_set.end(), std::back_inserter(merged));
+        merge_buf = std::move(merged);
+      }
+
+      reach[j] = std::move(merge_buf);
+    }
+  }
+
+  // Flatten reach into CSC-like format.
+  reach_indptr.assign(n_ + 1, 0);
+  for (int j = 0; j < n_; ++j) {
+    reach_indptr[j + 1] =
+      reach_indptr[j] + static_cast<int>(reach[j].size());
+  }
+  reach_indices.resize(reach_indptr[n_]);
+  for (int j = 0; j < n_; ++j) {
+    std::copy(reach[j].begin(), reach[j].end(),
+      reach_indices.begin() + reach_indptr[j]);
+  }
+}
+
+//==============================================================================
+// CSCMatrix::from_triplets
+//==============================================================================
+
+CSCMatrix CSCMatrix::from_triplets(int n, const vector<int>& rows,
+  const vector<int>& cols, const vector<double>& vals)
+{
+  if (rows.size() != cols.size() || rows.size() != vals.size()) {
+    throw std::invalid_argument {
+      fmt::format("CSCMatrix::from_triplets: size mismatch (rows={}, "
+                  "cols={}, vals={})",
+        rows.size(), cols.size(), vals.size())};
+  }
+  int nt = static_cast<int>(rows.size());
+
+  // Sort triplets by (col, row).
+  vector<int> order(nt);
+  std::iota(order.begin(), order.end(), 0);
+  std::sort(order.begin(), order.end(), [&](int a, int b) {
+    return cols[a] < cols[b] || (cols[a] == cols[b] && rows[a] < rows[b]);
+  });
+
+  // First pass: collect entries with duplicates summed.
+  struct Entry {
+    int row, col;
+    double val;
+  };
+  vector<Entry> entries;
+  entries.reserve(nt);
+
+  int prev_col = -1;
+  int prev_row = -1;
+  for (int k = 0; k < nt; ++k) {
+    int i = rows[order[k]];
+    int j = cols[order[k]];
+    double v = vals[order[k]];
+    if (i < 0 || i >= n || j < 0 || j >= n) {
+      throw std::invalid_argument {
+        fmt::format("CSCMatrix::from_triplets: index ({}, {}) out of "
+                    "bounds for n={}", i, j, n)};
+    }
+    if (j == prev_col && i == prev_row) {
+      entries.back().val += v;
+      continue;
+    }
+    entries.push_back({i, j, v});
+    prev_col = j;
+    prev_row = i;
+  }
+
+  // Second pass: emit only nonzero entries.
+  vector<int> indptr(n + 1, 0);
+  vector<int> indices;
+  vector<double> data;
+  indices.reserve(entries.size());
+  data.reserve(entries.size());
+
+  prev_col = -1;
+  for (const auto& e : entries) {
+    if (e.val == 0.0)
+      continue;
+    indices.push_back(e.row);
+    data.push_back(e.val);
+    for (int c = prev_col + 1; c <= e.col; ++c) {
+      indptr[c] = static_cast<int>(indices.size()) - 1;
+    }
+    prev_col = e.col;
+  }
+  for (int c = prev_col + 1; c <= n; ++c) {
+    indptr[c] = static_cast<int>(indices.size());
+  }
+
+  return CSCMatrix(
+    CSCPattern(n, std::move(indptr), std::move(indices)), std::move(data));
 }
 
 } // namespace openmc

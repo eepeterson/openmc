@@ -170,3 +170,104 @@ TEST_CASE("CSCMatrix rejects data/nnz size mismatch")
   CHECK_THROWS_AS(
     CSCMatrix(2, {0, 1, 2}, {0, 1}, {1.0}), std::invalid_argument);
 }
+
+TEST_CASE("CSCPattern::from_triplets collapses duplicates")
+{
+  // 3x3 with duplicate (0,0) and (2,1)
+  vector<int> rows = {0, 0, 2, 2, 1, 2};
+  vector<int> cols = {0, 0, 1, 1, 2, 0};
+  CSCPattern p = CSCPattern::from_triplets(3, rows, cols);
+  REQUIRE(p.n() == 3);
+  REQUIRE(p.indptr() == vector<int> {0, 2, 3, 4});
+  REQUIRE(p.indices() == vector<int> {0, 2, 2, 1});
+}
+
+TEST_CASE("CSCMatrix::from_triplets sums duplicates and drops zero sums")
+{
+  vector<int> rows = {0, 0, 1};
+  vector<int> cols = {0, 0, 1};
+  vector<double> vals = {1.5, -1.5, 2.0};
+  CSCMatrix m = CSCMatrix::from_triplets(2, rows, cols, vals);
+  // (0,0) sums to zero and should be dropped; only (1,1) remains.
+  REQUIRE(m.nnz() == 1);
+  REQUIRE(m.indices() == vector<int> {1});
+  REQUIRE(m.data() == vector<double> {2.0});
+}
+
+TEST_CASE("CSCPattern::topological_sort yields a strictly lower-triangular "
+          "permutation for an acyclic graph")
+{
+  // 4-node DAG: 0 -> 2, 1 -> 2, 2 -> 3 (col -> row in CSC).
+  vector<int> rows = {0, 1, 2, 2, 3};
+  vector<int> cols = {0, 1, 0, 1, 2};
+  CSCPattern p = CSCPattern::from_triplets(4, rows, cols);
+  vector<int> perm = p.topological_sort();
+  REQUIRE(perm.size() == 4);
+
+  // Verify: under perm, every off-diagonal entry has new_row > new_col.
+  vector<int> inv(4);
+  for (int i = 0; i < 4; ++i) inv[perm[i]] = i;
+  for (int j = 0; j < p.n(); ++j) {
+    for (int k = p.indptr()[j]; k < p.indptr()[j + 1]; ++k) {
+      int row = p.indices()[k];
+      if (row != j) REQUIRE(inv[row] > inv[j]);
+    }
+  }
+}
+
+TEST_CASE("CSCPattern::topological_sort throws on a cyclic graph")
+{
+  // 2-node cycle: 0 -> 1 and 1 -> 0.
+  vector<int> rows = {0, 1};
+  vector<int> cols = {1, 0};
+  CSCPattern p = CSCPattern::from_triplets(2, rows, cols);
+  CHECK_THROWS_AS(p.topological_sort(), std::invalid_argument);
+}
+
+TEST_CASE("CSCPattern::reachability matches brute-force transitive closure")
+{
+  // 5-node DAG:
+  //   0 -> 2, 1 -> 2, 2 -> 3, 3 -> 4
+  vector<int> rows = {0, 1, 2, 2, 3, 4};
+  vector<int> cols = {0, 1, 0, 1, 2, 3};
+  CSCPattern p = CSCPattern::from_triplets(5, rows, cols);
+  vector<int> perm = p.topological_sort();
+  vector<int> reach_indptr, reach_indices;
+  p.reachability(perm, reach_indptr, reach_indices);
+
+  // Brute force: for each j (in permuted space), compute descendants via BFS.
+  // Build a permuted adjacency list.
+  vector<int> inv(p.n());
+  for (int i = 0; i < p.n(); ++i) inv[perm[i]] = i;
+  vector<vector<int>> adj(p.n());
+  for (int j = 0; j < p.n(); ++j) {
+    int orig = perm[j];
+    for (int k = p.indptr()[orig]; k < p.indptr()[orig + 1]; ++k) {
+      int orig_row = p.indices()[k];
+      if (orig_row != orig) adj[j].push_back(inv[orig_row]);
+    }
+  }
+  for (int j = 0; j < p.n(); ++j) {
+    // BFS to enumerate all reachable nodes from j (excluding j).
+    vector<char> visited(p.n(), 0);
+    vector<int> stack {j};
+    while (!stack.empty()) {
+      int u = stack.back();
+      stack.pop_back();
+      for (int v : adj[u]) {
+        if (!visited[v]) {
+          visited[v] = 1;
+          stack.push_back(v);
+        }
+      }
+    }
+    vector<int> expected;
+    for (int v = 0; v < p.n(); ++v) {
+      if (visited[v]) expected.push_back(v);
+    }
+    vector<int> actual(
+      reach_indices.begin() + reach_indptr[j],
+      reach_indices.begin() + reach_indptr[j + 1]);
+    REQUIRE(actual == expected);
+  }
+}

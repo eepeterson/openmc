@@ -14,6 +14,7 @@
 #include "openmc/angle_energy.h" // for AngleEnergy
 #include "openmc/distribution.h" // for UPtrDist
 #include "openmc/memory.h"       // for unique_ptr
+#include "openmc/sparse_matrix.h"
 #include "openmc/vector.h"
 
 namespace openmc {
@@ -171,11 +172,52 @@ public:
   std::unordered_map<int, std::unordered_map<int, double>>
   get_default_fission_yields() const;
 
+  //! Cached decay-only transmutation matrix. Built once during load_xml() and
+  //! reused for every material/timestep. Contains diagonal loss terms and
+  //! off-diagonal gain terms (branching ratios, alpha/proton production)
+  //! from radioactive decay only.
+  const CSCMatrix& decay_matrix() const { return decay_matrix_; }
+
+  //! Topological permutation of the decay DAG: perm[new_idx] = old_idx.
+  //! Reorders the decay matrix into strictly lower-triangular form.
+  const vector<int>& decay_perm() const { return decay_perm_; }
+
+  //! Permuted lower-triangular decay matrix in separated diagonal + off-diag
+  //! format. The diagonal is indexed by topological position. The off-diagonal
+  //! CSC arrays (indptr, rowidx, data) store only below-diagonal entries with
+  //! row indices in permuted space.
+  const vector<double>& decay_diag() const { return decay_diag_; }
+  const vector<int>& decay_lt_indptr() const { return decay_lt_indptr_; }
+  const vector<int>& decay_lt_rowidx() const { return decay_lt_rowidx_; }
+  const vector<double>& decay_lt_data() const { return decay_lt_data_; }
+
+  //! Structural reachability of the decay DAG under the topological
+  //! permutation. For each column j (in permuted space), the slice
+  //! [reach_indptr[j], reach_indptr[j+1]) of reach_indices lists the permuted
+  //! indices reachable from j via off-diagonal edges (excluding j).
+  const vector<int>& decay_reach_indptr() const { return decay_reach_indptr_; }
+  const vector<int>& decay_reach_indices() const
+  {
+    return decay_reach_indices_;
+  }
+
 private:
+  //! Build decay_matrix_ and the cached permuted lower-triangular structure.
+  void build_decay_matrix();
+
   vector<unique_ptr<ChainNuclide>> nuclides_;
   std::unordered_map<std::string, int> nuclide_map_;
   vector<std::string> reactions_;
   std::unordered_map<std::string, int> reaction_map_;
+
+  CSCMatrix decay_matrix_;          //!< Cached decay-only matrix
+  vector<int> decay_perm_;          //!< Topological permutation
+  vector<int> decay_reach_indptr_;  //!< Reachability column pointers [n+1]
+  vector<int> decay_reach_indices_; //!< Reachability row indices
+  vector<double> decay_diag_;       //!< Diagonal in topo order [n]
+  vector<int> decay_lt_indptr_;     //!< Off-diag column pointers [n+1]
+  vector<int> decay_lt_rowidx_;     //!< Off-diag row indices (permuted)
+  vector<double> decay_lt_data_;    //!< Off-diag values
 };
 
 //==============================================================================

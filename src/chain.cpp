@@ -217,6 +217,9 @@ void DepletionChain::load_xml(const std::string& filename)
     nuclides_[nuc_idx]->set_fission_yields(
       nuclides_[parent_idx]->fission_yields());
   }
+
+  // Build cached decay matrix and permuted lower-triangular structure.
+  build_decay_matrix();
 }
 
 std::unordered_map<int, std::unordered_map<int, double>>
@@ -250,6 +253,131 @@ DepletionChain::get_default_fission_yields() const
   }
 
   return result;
+}
+
+void DepletionChain::build_decay_matrix()
+{
+  int n = size();
+  vector<int> rows, cols;
+  vector<double> vals;
+  rows.reserve(n * 2);
+  cols.reserve(n * 2);
+  vals.reserve(n * 2);
+
+  for (int i = 0; i < n; ++i) {
+    const auto& nuc = *nuclides_[i];
+    if (nuc.stable())
+      continue;
+
+    double decay_const = nuc.decay_constant();
+    if (decay_const == 0.0)
+      continue;
+
+    // Diagonal loss term
+    rows.push_back(i);
+    cols.push_back(i);
+    vals.push_back(-decay_const);
+
+    // Off-diagonal gain terms
+    for (const auto& dm : nuc.decay_modes()) {
+      double branch_val = dm.branching_ratio * decay_const;
+      if (branch_val == 0.0)
+        continue;
+
+      // Skip spontaneous fission targets — sf products are handled through
+      // fission yield data, not direct decay targets.
+      if (!dm.target.empty() && dm.type.find("sf") == std::string::npos) {
+        int k = nuclide_index(dm.target);
+        if (k >= 0) {
+          rows.push_back(k);
+          cols.push_back(i);
+          vals.push_back(branch_val);
+        }
+      }
+
+      // Produce alphas and protons from decay.
+      if (dm.type.find("alpha") != std::string::npos) {
+        int k = nuclide_index("He4");
+        if (k >= 0) {
+          int count = 0;
+          std::string::size_type pos = 0;
+          while ((pos = dm.type.find("alpha", pos)) != std::string::npos) {
+            ++count;
+            pos += 5;
+          }
+          rows.push_back(k);
+          cols.push_back(i);
+          vals.push_back(count * branch_val);
+        }
+      } else if (dm.type.find('p') != std::string::npos) {
+        int k = nuclide_index("H1");
+        if (k >= 0) {
+          int count = 0;
+          for (char c : dm.type) {
+            if (c == 'p')
+              ++count;
+          }
+          rows.push_back(k);
+          cols.push_back(i);
+          vals.push_back(count * branch_val);
+        }
+      }
+    }
+  }
+
+  decay_matrix_ = CSCMatrix::from_triplets(n, rows, cols, vals);
+
+  // Compute topological permutation + structural reachability of the decay
+  // DAG once. These are reused by the decay solver.
+  decay_perm_ = decay_matrix_.pattern().topological_sort();
+  decay_matrix_.pattern().reachability(
+    decay_perm_, decay_reach_indptr_, decay_reach_indices_);
+
+  // Build permuted lower-triangular structure for the decay solver: split
+  // the diagonal and off-diagonal entries, with off-diagonal row indices
+  // mapped into permuted space.
+  const auto& a_indptr = decay_matrix_.indptr();
+  const auto& a_indices = decay_matrix_.indices();
+  const auto& a_data = decay_matrix_.data();
+
+  vector<int> inv_perm(n);
+  for (int i = 0; i < n; ++i) {
+    inv_perm[decay_perm_[i]] = i;
+  }
+
+  decay_diag_.assign(n, 0.0);
+  decay_lt_indptr_.assign(n + 1, 0);
+
+  // First pass: count off-diagonal entries per topological column.
+  for (int j = 0; j < n; ++j) {
+    int orig_col = decay_perm_[j];
+    int count = 0;
+    for (int p = a_indptr[orig_col]; p < a_indptr[orig_col + 1]; ++p) {
+      if (a_indices[p] == orig_col) {
+        decay_diag_[j] = a_data[p];
+      } else {
+        ++count;
+      }
+    }
+    decay_lt_indptr_[j + 1] = decay_lt_indptr_[j] + count;
+  }
+
+  // Second pass: fill off-diagonal arrays.
+  int lt_nnz = decay_lt_indptr_[n];
+  decay_lt_rowidx_.assign(lt_nnz, 0);
+  decay_lt_data_.assign(lt_nnz, 0.0);
+  for (int j = 0; j < n; ++j) {
+    int orig_col = decay_perm_[j];
+    int pos = decay_lt_indptr_[j];
+    for (int p = a_indptr[orig_col]; p < a_indptr[orig_col + 1]; ++p) {
+      int orig_row = a_indices[p];
+      if (orig_row != orig_col) {
+        decay_lt_rowidx_[pos] = inv_perm[orig_row];
+        decay_lt_data_[pos] = a_data[p];
+        ++pos;
+      }
+    }
+  }
 }
 
 //==============================================================================
