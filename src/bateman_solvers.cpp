@@ -656,9 +656,13 @@ using namespace openmc;
 
 extern "C" int openmc_cram_solve(int n, const int* indptr, const int* indices,
   const double* data, const double* n0, double dt, int order, int substeps,
-  double* result)
+  int is_decay, double* result)
 {
-  if (!indptr || !indices || !data || !n0 || !result) {
+  if (!n0 || !result) {
+    set_errmsg("openmc_cram_solve: null pointer argument");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+  if (!is_decay && (!indptr || !indices || !data)) {
     set_errmsg("openmc_cram_solve: null pointer argument");
     return OPENMC_E_INVALID_ARGUMENT;
   }
@@ -668,18 +672,67 @@ extern "C" int openmc_cram_solve(int n, const int* indptr, const int* indices,
   }
 
   try {
-    int nnz = indptr[n];
-    CSCMatrix A(n, vector<int>(indptr, indptr + n + 1),
-      vector<int>(indices, indices + nnz), vector<double>(data, data + nnz));
     vector<double> n0_vec(n0, n0 + n);
+    vector<double> y;
 
-    IPFCramSolver solver(order);
-    vector<double> y = solver.solve(A, n0_vec, dt, substeps);
+    if (is_decay) {
+      if (!data::depletion_chain) {
+        set_errmsg(
+          "openmc_cram_solve: is_decay requested but no depletion chain "
+          "is loaded; call openmc_load_depletion_chain() first.");
+        return OPENMC_E_DATA;
+      }
+      if (n != data::depletion_chain->size()) {
+        set_errmsg(fmt::format(
+          "openmc_cram_solve: n ({}) != depletion chain size ({}).",
+          n, data::depletion_chain->size()));
+        return OPENMC_E_INVALID_ARGUMENT;
+      }
+      // Cache the decay solver; rebuild if chain or order changed.
+      static std::unique_ptr<IPFCramDecaySolver> cached_solver;
+      static const DepletionChain* cached_chain = nullptr;
+      static int cached_order = -1;
+      if (!cached_solver || cached_chain != data::depletion_chain.get() ||
+          cached_order != order) {
+        cached_solver = std::make_unique<IPFCramDecaySolver>(
+          *data::depletion_chain, order);
+        cached_chain = data::depletion_chain.get();
+        cached_order = order;
+      }
+      // A is unused by IPFCramDecaySolver; pass an empty matrix.
+      CSCMatrix A_unused {CSCPattern(n)};
+      y = cached_solver->solve(A_unused, n0_vec, dt, substeps);
+    } else {
+      int nnz = indptr[n];
+      CSCMatrix A(n, vector<int>(indptr, indptr + n + 1),
+        vector<int>(indices, indices + nnz), vector<double>(data, data + nnz));
+      IPFCramSolver solver(order);
+      y = solver.solve(A, n0_vec, dt, substeps);
+    }
     std::copy(y.begin(), y.end(), result);
   } catch (const std::invalid_argument& e) {
     set_errmsg(e.what());
     return OPENMC_E_INVALID_ARGUMENT;
   } catch (const std::exception& e) {
+    set_errmsg(e.what());
+    return OPENMC_E_DATA;
+  }
+  return 0;
+}
+
+extern "C" int openmc_load_depletion_chain(const char* filename)
+{
+  if (!filename) {
+    set_errmsg("openmc_load_depletion_chain: null filename");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+  try {
+    data::depletion_chain = make_unique<DepletionChain>();
+    data::depletion_chain->load_xml(filename);
+    data::chain_nuclide_map = data::depletion_chain->nuclide_map();
+  } catch (const std::exception& e) {
+    data::depletion_chain.reset();
+    data::chain_nuclide_map.clear();
     set_errmsg(e.what());
     return OPENMC_E_DATA;
   }

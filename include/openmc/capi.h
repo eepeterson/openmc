@@ -340,11 +340,20 @@ int openmc_properties_import(const char* filename);
 //! \param[in] dt        Time interval in seconds
 //! \param[in] order     CRAM approximation order (16 or 48)
 //! \param[in] substeps  Number of substeps to use within dt
+//! \param[in] is_decay  If non-zero, ignore (indptr/indices/data) and use the
+//!                      cached pure-decay solver built from the loaded
+//!                      depletion chain. The CSC arrays may be NULL in this
+//!                      case.
 //! \param[out] result   Final atom densities [n]
 //! \return Error code
 int openmc_cram_solve(int n, const int* indptr, const int* indices,
   const double* data, const double* n0, double dt, int order, int substeps,
-  double* result);
+  int is_decay, double* result);
+
+//! Load a depletion chain XML file into the C++ runtime.
+//! \param[in] filename  Path to chain XML file
+//! \return Error code
+int openmc_load_depletion_chain(const char* filename);
 
 // Error codes
 extern int OPENMC_E_UNASSIGNED;
