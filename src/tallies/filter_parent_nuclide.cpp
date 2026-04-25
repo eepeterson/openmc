@@ -20,7 +20,7 @@ void ParentNuclideFilter::from_xml(pugi::xml_node node)
 {
   nuclides_ = get_node_array<std::string>(node, "bins");
 
-  // Convert nuclides to indices in data::chain_nuclides
+  // Convert nuclides to indices in data::depletion_chain
   std::vector<int> bins;
   for (const auto& nuclide : nuclides_) {
     auto it = data::chain_nuclide_map.find(nuclide);
