@@ -982,8 +982,16 @@ class Integrator(ABC):
                 # Get beginning-of-step data from operator or restart results
                 n, res, keff_search_root = self._get_bos_data(i, source_rate, n)
 
-                # Solve Bateman equations over time interval
-                self._pure_decay_step = (source_rate == 0.0)
+                # Solve Bateman equations over time interval. The pure-decay
+                # C++ path uses the chain-cached decay matrix and cannot
+                # accommodate user-modified Bateman terms (transfer rates,
+                # external sources, redox). Dispatch to it only when the
+                # full Bateman matrix equals the chain decay matrix.
+                self._pure_decay_step = (
+                    source_rate == 0.0
+                    and self.transfer_rates is None
+                    and self.external_source_rates is None
+                )
                 proc_time, n_end = self(n, res.rates, dt, source_rate, i)
 
                 StepResult.save(
