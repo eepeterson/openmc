@@ -101,6 +101,9 @@ public:
   const vector<double>& data() const { return data_; }
   vector<double>& data() { return data_; }
 
+  //! Sparse matrix-vector multiply: y = A * x.
+  vector<double> matvec(const vector<double>& x) const;
+
 private:
   CSCPattern pattern_;  //!< Structural pattern
   vector<double> data_; //!< Values [nnz]

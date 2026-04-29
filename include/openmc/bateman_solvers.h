@@ -134,16 +134,12 @@ private:
   //! Per-step solve via fused forward-sub/accumulate (one pass per pole).
   vector<double> solve_step(const vector<double>& n0, double dt) const;
 
-  //! Build M = exp(decay * dt_sub) using CRAM column-by-column, exploiting
-  //! the chain's reachability arrays.
-  CSCMatrix build_expm(double dt_sub) const;
+  //! Build M = exp(decay * dt) using CRAM column-by-column, exploiting the
+  //! chain's reachability arrays.
+  CSCMatrix build_expm(double dt) const;
 
-  //! Apply a cached expm matrix M to n0 (sparse SpMV).
-  static vector<double> apply_expm(
-    const CSCMatrix& M, const vector<double>& n0);
-
-  //! Look up M = exp(decay * dt_sub) in the LRU cache, building if missing.
-  const CSCMatrix& cached_expm(double dt_sub);
+  //! Look up M = exp(decay * dt) in the LRU cache, building if missing.
+  const CSCMatrix& cached_expm(double dt);
 
   // Chain references (chain owns these)
   const DepletionChain& chain_;
@@ -163,7 +159,7 @@ private:
 
   // LRU expm cache (small linear scan; capacity 4)
   struct ExpmEntry {
-    double dt_sub;
+    double dt;
     CSCMatrix M;
   };
   vector<ExpmEntry> expm_cache_;

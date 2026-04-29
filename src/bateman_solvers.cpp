@@ -418,7 +418,7 @@ vector<double> IPFCramDecaySolver::solve_step(
   return result;
 }
 
-CSCMatrix IPFCramDecaySolver::build_expm(double dt_sub) const
+CSCMatrix IPFCramDecaySolver::build_expm(double dt) const
 {
   int n = chain_.size();
   const int* reach_indptr = reach_indptr_.data();
@@ -429,23 +429,24 @@ CSCMatrix IPFCramDecaySolver::build_expm(double dt_sub) const
   int total = n + reach_indptr[n];
   vector<double> M_vals(total, 0.0);
 
-  // Initialize M = I (only diagonal entries).
-  for (int j = 0; j < n; ++j) {
-    M_vals[j + reach_indptr[j]] = 1.0;
-  }
-
+  // Column-outer / pole-inner: each column j is fully independent, so this
+  // ordering keeps the per-column workspace `x` and M slice hot in cache and
+  // makes the j-loop trivially parallelizable. The poles must remain
+  // sequential within a column because the IPF iteration accumulates each
+  // pole's contribution into M[:,j] before the next pole's solve.
   vector<std::complex<double>> x(n, std::complex<double> {0.0, 0.0});
 
-  // IPF iteration: for each pole, run column-by-column forward substitution
-  // restricted to {j} ∪ reach[j].
-  for (int p = 0; p < n_poles_; ++p) {
-    auto theta_p = theta_[p];
-    auto alpha_p = alpha_[p];
+  for (int j = 0; j < n; ++j) {
+    int off = j + reach_indptr[j];
+    int roff = reach_indptr[j];
+    int rlen = reach_indptr[j + 1] - roff;
 
-    for (int j = 0; j < n; ++j) {
-      int off = j + reach_indptr[j];
-      int roff = reach_indptr[j];
-      int rlen = reach_indptr[j + 1] - roff;
+    // Initialize column to e_j (M = I starting point).
+    M_vals[off] = 1.0;
+
+    for (int p = 0; p < n_poles_; ++p) {
+      auto theta_p = theta_[p];
+      auto alpha_p = alpha_[p];
 
       // Scatter compressed M column into dense complex workspace.
       x[j] = {M_vals[off], 0.0};
@@ -455,20 +456,20 @@ CSCMatrix IPFCramDecaySolver::build_expm(double dt_sub) const
 
       // Forward substitution over {j} ∪ reach[j]. Process j first.
       x[j] = fast_cmul(x[j], fast_crecip(std::complex<double> {
-                               diag_[j] * dt_sub - theta_p.real(),
+                               diag_[j] * dt - theta_p.real(),
                                -theta_p.imag()}));
       for (int lp = lt_indptr_[j]; lp < lt_indptr_[j + 1]; ++lp) {
-        double a = lt_data_[lp] * dt_sub;
+        double a = lt_data_[lp] * dt;
         x[lt_rowidx_[lp]] -=
           std::complex<double>(a * x[j].real(), a * x[j].imag());
       }
       for (int ki = 0; ki < rlen; ++ki) {
         int c = reach_indices[roff + ki];
         x[c] = fast_cmul(x[c], fast_crecip(std::complex<double> {
-                                 diag_[c] * dt_sub - theta_p.real(),
+                                 diag_[c] * dt - theta_p.real(),
                                  -theta_p.imag()}));
         for (int lp = lt_indptr_[c]; lp < lt_indptr_[c + 1]; ++lp) {
-          double a = lt_data_[lp] * dt_sub;
+          double a = lt_data_[lp] * dt;
           x[lt_rowidx_[lp]] -=
             std::complex<double>(a * x[c].real(), a * x[c].imag());
         }
@@ -576,30 +577,10 @@ CSCMatrix IPFCramDecaySolver::build_expm(double dt_sub) const
   return CSCMatrix(std::move(pattern), std::move(out_data));
 }
 
-vector<double> IPFCramDecaySolver::apply_expm(
-  const CSCMatrix& M, const vector<double>& n0)
-{
-  int n = M.n();
-  const auto& indptr = M.indptr();
-  const auto& indices = M.indices();
-  const auto& data = M.data();
-
-  vector<double> result(n, 0.0);
-  for (int j = 0; j < n; ++j) {
-    double xj = n0[j];
-    if (xj == 0.0)
-      continue;
-    for (int p = indptr[j]; p < indptr[j + 1]; ++p) {
-      result[indices[p]] += data[p] * xj;
-    }
-  }
-  return result;
-}
-
-const CSCMatrix& IPFCramDecaySolver::cached_expm(double dt_sub)
+const CSCMatrix& IPFCramDecaySolver::cached_expm(double dt)
 {
   for (auto it = expm_cache_.begin(); it != expm_cache_.end(); ++it) {
-    if (it->dt_sub == dt_sub) {
+    if (it->dt == dt) {
       // Move-to-front for LRU.
       ExpmEntry hit = std::move(*it);
       expm_cache_.erase(it);
@@ -611,7 +592,7 @@ const CSCMatrix& IPFCramDecaySolver::cached_expm(double dt_sub)
     expm_cache_.pop_back();
   }
   expm_cache_.insert(
-    expm_cache_.begin(), ExpmEntry {dt_sub, build_expm(dt_sub)});
+    expm_cache_.begin(), ExpmEntry {dt, build_expm(dt)});
   return expm_cache_.front().M;
 }
 
@@ -636,12 +617,11 @@ vector<double> IPFCramDecaySolver::solve(
   }
 
   // Build/lookup M = exp(decay * dt/substeps), then apply substeps times.
-  double dt_sub = dt / substeps;
-  const CSCMatrix& M = cached_expm(dt_sub);
+  const CSCMatrix& M = cached_expm(dt / substeps);
 
   vector<double> y = n0;
   for (int s = 0; s < substeps; ++s) {
-    y = apply_expm(M, y);
+    y = M.matvec(y);
   }
   return y;
 }

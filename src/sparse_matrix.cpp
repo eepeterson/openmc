@@ -75,6 +75,27 @@ CSCMatrix::CSCMatrix(
   }
 }
 
+vector<double> CSCMatrix::matvec(const vector<double>& x) const
+{
+  int n = pattern_.n();
+  if (static_cast<int>(x.size()) != n) {
+    throw std::invalid_argument {fmt::format(
+      "CSCMatrix::matvec: x size ({}) != matrix dimension ({})", x.size(), n)};
+  }
+  const auto& indptr = pattern_.indptr();
+  const auto& indices = pattern_.indices();
+  vector<double> y(n, 0.0);
+  for (int j = 0; j < n; ++j) {
+    double xj = x[j];
+    if (xj == 0.0)
+      continue;
+    for (int p = indptr[j]; p < indptr[j + 1]; ++p) {
+      y[indices[p]] += data_[p] * xj;
+    }
+  }
+  return y;
+}
+
 bool CSCPattern::operator==(const CSCPattern& other) const
 {
   return n_ == other.n_ && indptr_ == other.indptr_ &&
