@@ -205,6 +205,8 @@ class SourceBase(ABC):
                 return MeshSource.from_xml_element(elem, meshes)
             elif source_type == 'tokamak':
                 return TokamakSource.from_xml_element(elem)
+            elif source_type == 'stellarator':
+                return StellaratorSource.from_xml_element(elem)
             else:
                 raise ValueError(
                     f'Source type {source_type} is not recognized')
@@ -1319,6 +1321,711 @@ class TokamakSource(SourceBase):
             phi_extent=phi_extent,
             n_alpha=n_alpha,
             vertical_shift=vertical_shift,
+            strength=strength,
+            constraints=constraints
+        )
+
+
+class StellaratorSource(SourceBase):
+    r"""A source representing neutron emission from a stellarator plasma.
+
+    This source samples neutron positions from a 3-D stellarator plasma
+    described by the flux-surface Fourier representation shared by the VMEC
+    and DESC equilibrium codes. The flux coordinates are
+    :math:`(\rho, \theta, \zeta)` where :math:`\rho = \sqrt{s}` is the square
+    root of the normalized toroidal flux (proportional to the average minor
+    radius), :math:`\theta` is the poloidal angle, and :math:`\zeta` is the
+    toroidal angle, which coincides with the cylindrical azimuthal angle
+    :math:`\phi` in both codes. Flux surfaces are given by
+
+    .. math::
+
+        \begin{aligned}
+        R(\rho,\theta,\zeta) &= \sum_k \left[ R^c_k(\rho)
+            \cos(m_k\theta - n_k N_{fp} \zeta)
+            + R^s_k(\rho) \sin(m_k\theta - n_k N_{fp}\zeta) \right] \\
+        Z(\rho,\theta,\zeta) &= \sum_k \left[ Z^s_k(\rho)
+            \sin(m_k\theta - n_k N_{fp}\zeta)
+            + Z^c_k(\rho) \cos(m_k\theta - n_k N_{fp}\zeta) \right]
+        \end{aligned}
+
+    where :math:`N_{fp}` is the number of field periods. For
+    stellarator-symmetric equilibria only :math:`R^c` and :math:`Z^s` are
+    non-zero.
+
+    Because :math:`\phi = \zeta`, the volume element is
+    :math:`dV = R\,|\tau|\, d\rho\, d\theta\, d\zeta` with the poloidal-plane
+    Jacobian :math:`\tau = \partial_\rho R\, \partial_\theta Z -
+    \partial_\theta R \,\partial_\rho Z`, so for an emission density
+    :math:`S(\rho)` constant on flux surfaces the joint density is
+    :math:`p(\rho,\theta,\zeta) \propto S(\rho) R |\tau|`. The radial
+    coordinate is sampled from the marginal
+    :math:`p(\rho) \propto S(\rho) V'(\rho)` (with
+    :math:`V'(\rho) = \oint\oint R|\tau| \,d\theta\, d\zeta` the differential
+    volume, evaluated exactly at initialization) via a tabulated CDF, and the
+    two angles are then sampled from the conditional
+    :math:`p(\theta,\zeta|\rho) \propto R|\tau|` by rejection against a
+    precomputed per-radial-bin majorant.
+
+    .. versionadded:: 0.16.1
+
+    Parameters
+    ----------
+    rho : numpy.ndarray
+        Radial grid points :math:`\rho = \sqrt{s}`, must start at 0 and end
+        at 1 and be strictly increasing.
+    emission_density : numpy.ndarray
+        Emission density :math:`S(\rho)` at each grid point (arbitrary units,
+        must be >= 0). Only the shape matters; it is normalized internally.
+    mode_m : numpy.ndarray of int
+        Poloidal mode numbers :math:`m_k \ge 0`.
+    mode_n : numpy.ndarray of int
+        Toroidal mode numbers :math:`n_k` in units of the number of field
+        periods (VMEC's ``xn``/``nfp``).
+    rmnc : numpy.ndarray
+        Cosine Fourier coefficients of :math:`R` in [cm] with shape
+        ``(len(rho), len(mode_m))``.
+    zmns : numpy.ndarray
+        Sine Fourier coefficients of :math:`Z` in [cm] with shape
+        ``(len(rho), len(mode_m))``.
+    energy : openmc.stats.Univariate or Sequence[openmc.stats.Univariate]
+        Energy distribution(s). Either a single distribution used at all
+        radii, or one distribution per ``rho`` grid point (selected by
+        stochastic interpolation between the two bracketing grid points).
+    num_field_periods : int
+        Number of field periods :math:`N_{fp}` (default: 1).
+    rmns : numpy.ndarray, optional
+        Sine Fourier coefficients of :math:`R` in [cm] for
+        non-stellarator-symmetric equilibria.
+    zmnc : numpy.ndarray, optional
+        Cosine Fourier coefficients of :math:`Z` in [cm] for
+        non-stellarator-symmetric equilibria.
+    time : openmc.stats.Univariate, optional
+        Time distribution of the source. If None, particles are born at
+        :math:`t = 0`.
+    strength : float
+        Strength of the source (default: 1.0)
+    constraints : dict
+        Constraints on sampled source particles. See :class:`SourceBase` for
+        valid keys and values.
+
+    Attributes
+    ----------
+    rho : numpy.ndarray
+        Radial grid points
+    emission_density : numpy.ndarray
+        Emission density at each grid point
+    mode_m : numpy.ndarray
+        Poloidal mode numbers
+    mode_n : numpy.ndarray
+        Toroidal mode numbers (per field period)
+    rmnc : numpy.ndarray
+        Cosine coefficients of R in [cm]
+    zmns : numpy.ndarray
+        Sine coefficients of Z in [cm]
+    rmns : numpy.ndarray or None
+        Sine coefficients of R in [cm]
+    zmnc : numpy.ndarray or None
+        Cosine coefficients of Z in [cm]
+    num_field_periods : int
+        Number of field periods
+    energy : list of openmc.stats.Univariate
+        Energy distribution(s)
+    time : openmc.stats.Univariate or None
+        Time distribution of the source
+    strength : float
+        Strength of the source
+    type : str
+        Indicator of source type: 'stellarator'
+    constraints : dict
+        Constraints on sampled source particles
+
+    """
+
+    def __init__(
+        self,
+        rho: Sequence[float],
+        emission_density: Sequence[float],
+        mode_m: Sequence[int],
+        mode_n: Sequence[int],
+        rmnc: Sequence[Sequence[float]],
+        zmns: Sequence[Sequence[float]],
+        energy: Univariate | Sequence[Univariate],
+        num_field_periods: int = 1,
+        rmns: Sequence[Sequence[float]] | None = None,
+        zmnc: Sequence[Sequence[float]] | None = None,
+        time: Univariate | None = None,
+        strength: float = 1.0,
+        constraints: dict[str, Any] | None = None
+    ):
+        super().__init__(strength=strength, constraints=constraints)
+        self.rho = rho
+        self.emission_density = emission_density
+        self.mode_m = mode_m
+        self.mode_n = mode_n
+        self.rmnc = rmnc
+        self.zmns = zmns
+        self.rmns = rmns
+        self.zmnc = zmnc
+        self.num_field_periods = num_field_periods
+        self.energy = energy
+        self.time = time
+
+        self._validate()
+
+    def _validate(self):
+        """Validate relationships between stellarator source parameters."""
+        n_rho = len(self.rho)
+        n_modes = len(self.mode_m)
+        if len(self.emission_density) != n_rho:
+            raise ValueError(
+                f"emission_density (length {len(self.emission_density)}) must "
+                f"have the same length as rho (length {n_rho})")
+        if not np.any(self.emission_density > 0.0):
+            raise ValueError("emission_density must contain a positive value")
+        if len(self.mode_n) != n_modes:
+            raise ValueError(
+                f"mode_n (length {len(self.mode_n)}) must have the same "
+                f"length as mode_m (length {n_modes})")
+        for name in ('rmnc', 'zmns', 'rmns', 'zmnc'):
+            coeff = getattr(self, name)
+            if coeff is not None and coeff.shape != (n_rho, n_modes):
+                raise ValueError(
+                    f"{name} must have shape (len(rho), len(mode_m)) = "
+                    f"({n_rho}, {n_modes}), got {coeff.shape}")
+        if (self.rmns is None) != (self.zmnc is None):
+            raise ValueError(
+                "rmns and zmnc must both be given for non-stellarator-"
+                "symmetric equilibria")
+        if len(self.energy) not in (1, n_rho):
+            raise ValueError(
+                f"Number of energy distributions ({len(self.energy)}) must be "
+                f"either 1 or equal to the number of rho grid points "
+                f"({n_rho})")
+
+    @property
+    def type(self) -> str:
+        return "stellarator"
+
+    @property
+    def rho(self) -> np.ndarray:
+        return self._rho
+
+    @rho.setter
+    def rho(self, value: Sequence[float]):
+        value = np.asarray(value, dtype=float)
+        if value.ndim != 1 or len(value) < 2:
+            raise ValueError("rho must be a 1-D array with at least 2 points")
+        if value[0] != 0.0:
+            raise ValueError("rho must start at 0")
+        if value[-1] != 1.0:
+            raise ValueError("rho must end at 1")
+        if not np.all(np.diff(value) > 0):
+            raise ValueError("rho must be strictly increasing")
+        self._rho = value
+
+    @property
+    def emission_density(self) -> np.ndarray:
+        return self._emission_density
+
+    @emission_density.setter
+    def emission_density(self, value: Sequence[float]):
+        value = np.asarray(value, dtype=float)
+        if value.ndim != 1:
+            raise ValueError("emission_density must be a 1-D array")
+        if np.any(value < 0):
+            raise ValueError("emission_density values cannot be negative")
+        self._emission_density = value
+
+    @property
+    def mode_m(self) -> np.ndarray:
+        return self._mode_m
+
+    @mode_m.setter
+    def mode_m(self, value: Sequence[int]):
+        value = np.asarray(value, dtype=int)
+        if value.ndim != 1 or len(value) < 1:
+            raise ValueError("mode_m must be a 1-D array with at least 1 mode")
+        if np.any(value < 0):
+            raise ValueError("mode_m values must be >= 0")
+        self._mode_m = value
+
+    @property
+    def mode_n(self) -> np.ndarray:
+        return self._mode_n
+
+    @mode_n.setter
+    def mode_n(self, value: Sequence[int]):
+        value = np.asarray(value, dtype=int)
+        if value.ndim != 1:
+            raise ValueError("mode_n must be a 1-D array")
+        self._mode_n = value
+
+    @staticmethod
+    def _check_coeff(name, value, none_ok=False):
+        if value is None:
+            if none_ok:
+                return None
+            raise ValueError(f"{name} must be given")
+        value = np.asarray(value, dtype=float)
+        if value.ndim != 2:
+            raise ValueError(f"{name} must be a 2-D array with shape "
+                             "(len(rho), len(mode_m))")
+        return value
+
+    @property
+    def rmnc(self) -> np.ndarray:
+        return self._rmnc
+
+    @rmnc.setter
+    def rmnc(self, value):
+        self._rmnc = self._check_coeff('rmnc', value)
+
+    @property
+    def zmns(self) -> np.ndarray:
+        return self._zmns
+
+    @zmns.setter
+    def zmns(self, value):
+        self._zmns = self._check_coeff('zmns', value)
+
+    @property
+    def rmns(self) -> np.ndarray | None:
+        return self._rmns
+
+    @rmns.setter
+    def rmns(self, value):
+        self._rmns = self._check_coeff('rmns', value, none_ok=True)
+
+    @property
+    def zmnc(self) -> np.ndarray | None:
+        return self._zmnc
+
+    @zmnc.setter
+    def zmnc(self, value):
+        self._zmnc = self._check_coeff('zmnc', value, none_ok=True)
+
+    @property
+    def num_field_periods(self) -> int:
+        return self._num_field_periods
+
+    @num_field_periods.setter
+    def num_field_periods(self, value: int):
+        cv.check_type('num_field_periods', value, Integral)
+        cv.check_greater_than('num_field_periods', value, 0)
+        self._num_field_periods = int(value)
+
+    @property
+    def energy(self) -> list[Univariate]:
+        return self._energy
+
+    @energy.setter
+    def energy(self, value: Univariate | Sequence[Univariate]):
+        if isinstance(value, Univariate):
+            self._energy = [value]
+        else:
+            cv.check_iterable_type('energy distributions', value, Univariate)
+            self._energy = list(value)
+
+    @property
+    def time(self) -> Univariate | None:
+        return self._time
+
+    @time.setter
+    def time(self, value: Univariate | None):
+        if value is not None:
+            cv.check_type('time distribution', value, Univariate)
+        self._time = value
+
+    @staticmethod
+    def _evaluate_emission_density(emission_density, rho):
+        """Evaluate an emission density callable or validate an array."""
+        if callable(emission_density):
+            return np.asarray(emission_density(rho), dtype=float)
+        emission_density = np.asarray(emission_density, dtype=float)
+        if emission_density.shape != rho.shape:
+            raise ValueError(
+                f"emission_density array (length {len(emission_density)}) "
+                f"must have one value per radial surface ({len(rho)}); "
+                "alternatively provide a callable S(rho)")
+        return emission_density
+
+    @classmethod
+    def from_vmec(
+        cls,
+        wout: PathLike,
+        emission_density,
+        energy: Univariate | Sequence[Univariate],
+        **kwargs
+    ) -> StellaratorSource:
+        """Generate a stellarator source from a VMEC wout file.
+
+        The VMEC radial grid is uniform in the normalized toroidal flux
+        :math:`s`; it is relabeled here as :math:`\\rho_j = \\sqrt{s_j}`, which
+        leaves the per-surface Fourier coefficients unchanged. VMEC's ``xn``
+        convention (kernel :math:`\\cos(m u - x_n v)` with ``xn`` a multiple of
+        the number of field periods) is converted to per-field-period mode
+        numbers. Coefficients are converted from [m] to [cm].
+
+        Classic-format (NetCDF3) wout files are read with
+        :func:`scipy.io.netcdf_file` and NetCDF4-format files (which are
+        HDF5-based) with :mod:`h5py`, so no additional packages are required.
+
+        Parameters
+        ----------
+        wout : path-like
+            Path to a VMEC ``wout_*.nc`` NetCDF output file.
+        emission_density : callable or numpy.ndarray
+            Either a callable ``S(rho)`` evaluated at the radial grid points,
+            or an array with one value per VMEC radial surface (arbitrary
+            units, must be >= 0).
+        energy : openmc.stats.Univariate or Sequence[openmc.stats.Univariate]
+            Energy distribution(s); see the class docstring.
+        **kwargs
+            Additional keyword arguments passed to the constructor
+            (e.g. ``time``, ``strength``, ``constraints``).
+
+        Returns
+        -------
+        openmc.StellaratorSource
+
+        """
+        ds = cls._read_wout(input_path(wout))
+        rmnc = ds['rmnc']
+        zmns = ds['zmns']
+        xm = ds['xm'].astype(int)
+        xn = ds['xn'].astype(int)
+        nfp = int(ds['nfp'])
+        lasym = bool(ds.get('lasym__logical__', 0))
+        rmns = ds['rmns'] if lasym else None
+        zmnc = ds['zmnc'] if lasym else None
+
+        ns = rmnc.shape[0]
+        s = np.linspace(0.0, 1.0, ns)
+        rho = np.sqrt(s)
+
+        # m to cm
+        rmnc = rmnc * 100.0
+        zmns = zmns * 100.0
+        if lasym:
+            rmns = rmns * 100.0
+            zmnc = zmnc * 100.0
+
+        return cls(
+            rho=rho,
+            emission_density=cls._evaluate_emission_density(
+                emission_density, rho),
+            mode_m=xm,
+            mode_n=xn // nfp,
+            rmnc=rmnc,
+            zmns=zmns,
+            rmns=rmns,
+            zmnc=zmnc,
+            num_field_periods=nfp,
+            energy=energy,
+            **kwargs
+        )
+
+    @staticmethod
+    def _read_wout(path):
+        """Read the needed variables from a VMEC wout file.
+
+        Classic (NetCDF3) files are read with scipy; NetCDF4-format files are
+        HDF5-based and read with h5py.
+        """
+        names = ('rmnc', 'zmns', 'rmns', 'zmnc', 'xm', 'xn', 'nfp',
+                 'lasym__logical__')
+        try:
+            from scipy.io import netcdf_file
+            with netcdf_file(str(path), mmap=False) as ds:
+                return {k: np.asarray(v[()], dtype=float)
+                        for k, v in ds.variables.items() if k in names}
+        except (OSError, TypeError, ValueError):
+            with h5py.File(path, 'r') as ds:
+                return {k: np.asarray(ds[k][()], dtype=float)
+                        for k in names if k in ds}
+
+    @staticmethod
+    def _desc_to_combined(modes_m, modes_n, coeffs, table):
+        """Fold DESC's product-form double Fourier coefficients into the
+        combined form sum[c*cos(m*theta - n*Nfp*zeta) + s*sin(...)], m >= 0.
+
+        DESC basis conventions: positive (negative) m selects cos(|m| theta)
+        (sin(|m| theta)); likewise for n with the toroidal angle. The Ptolemy
+        identities split each product into the two combined-form harmonics
+        (m, n) and (m, -n), and modes with m < 0 (or m == 0, n < 0) are folded
+        using cos(-x) = cos(x), sin(-x) = -sin(x).
+        """
+        def add(m, n, c, s):
+            if m < 0 or (m == 0 and n < 0):
+                m, n, s = -m, -n, -s
+            entry = table.setdefault((m, n), [0.0, 0.0])
+            entry[0] += c
+            entry[1] += s
+
+        for m0, n0, x in zip(modes_m, modes_n, coeffs):
+            am, an = abs(int(m0)), abs(int(n0))
+            h = 0.5 * float(x)
+            if m0 >= 0 and n0 >= 0:    # cos(m theta) * cos(n zeta')
+                add(am, an, h, 0.0)
+                add(am, -an, h, 0.0)
+            elif m0 < 0 and n0 >= 0:   # sin(m theta) * cos(n zeta')
+                add(am, an, 0.0, h)
+                add(am, -an, 0.0, h)
+            elif m0 >= 0 and n0 < 0:   # cos(m theta) * sin(n zeta')
+                add(am, an, 0.0, -h)
+                add(am, -an, 0.0, h)
+            else:                      # sin(m theta) * sin(n zeta')
+                add(am, an, h, 0.0)
+                add(am, -an, -h, 0.0)
+
+    @staticmethod
+    def _zernike_radial(rho, l, m):
+        """Unnormalized Zernike radial polynomial :math:`R_l^{|m|}(\\rho)`."""
+        from math import factorial
+        m = abs(m)
+        out = np.zeros_like(rho, dtype=float)
+        for k in range((l - m) // 2 + 1):
+            c = ((-1)**k * factorial(l - k)
+                 / (factorial(k) * factorial((l + m) // 2 - k)
+                    * factorial((l - m) // 2 - k)))
+            out += c * rho**(l - 2*k)
+        return out
+
+    @staticmethod
+    def _desc_spectral_data(eq):
+        """Extract Fourier-Zernike modes/coefficients from a DESC equilibrium.
+
+        Accepts either a live ``desc.equilibrium.Equilibrium`` (duck-typed, so
+        no import of desc is needed) or a path to a DESC HDF5 output file,
+        which is read directly with h5py. Returns ``(r_modes, r_lmn, z_modes,
+        z_lmn, nfp)`` where the modes arrays have columns ``(l, m, n)``.
+        """
+        if isinstance(eq, (str, Path)):
+            with h5py.File(input_path(eq), 'r') as f:
+                # Output files may contain a family of equilibria; use the last
+                g = f
+                if '_equilibria' in f:
+                    idx = sorted((k for k in f['_equilibria'] if k.isdigit()),
+                                 key=int)
+                    g = f['_equilibria'][idx[-1]]
+                return (np.asarray(g['_R_basis/_modes'][()], dtype=int),
+                        np.asarray(g['_R_lmn'][()], dtype=float),
+                        np.asarray(g['_Z_basis/_modes'][()], dtype=int),
+                        np.asarray(g['_Z_lmn'][()], dtype=float),
+                        int(g['_NFP'][()]))
+        return (np.asarray(eq.R_basis.modes, dtype=int),
+                np.asarray(eq.R_lmn, dtype=float),
+                np.asarray(eq.Z_basis.modes, dtype=int),
+                np.asarray(eq.Z_lmn, dtype=float),
+                int(eq.NFP))
+
+    @classmethod
+    def from_desc(
+        cls,
+        eq,
+        emission_density,
+        energy: Univariate | Sequence[Univariate],
+        n_rho: int = 33,
+        **kwargs
+    ) -> StellaratorSource:
+        """Generate a stellarator source from a DESC equilibrium.
+
+        DESC represents :math:`R` and :math:`Z` in a Fourier-Zernike basis,
+        :math:`X(\\rho,\\theta,\\zeta) = \\sum_{lmn} X_{lmn}\\,
+        \\mathcal{R}_l^{|m|}(\\rho)\\, \\mathcal{F}_m(\\theta)\\,
+        \\mathcal{F}_n(N_{fp}\\zeta)`, where :math:`\\mathcal{R}_l^{|m|}` is the
+        (unnormalized) Zernike radial polynomial and :math:`\\mathcal{F}_m(x)`
+        is :math:`\\cos(|m|x)` for :math:`m \\ge 0` and :math:`\\sin(|m|x)`
+        otherwise. The Zernike polynomials are evaluated here on a uniform grid
+        in :math:`\\rho` (DESC's native radial coordinate) to obtain
+        per-surface double Fourier coefficients, which are then converted from
+        DESC's product-form basis to the combined VMEC-style form using the
+        Ptolemy identities. Coefficients are converted from [m] to [cm]. No
+        additional packages are required: DESC HDF5 output files are read
+        directly with :mod:`h5py`, and live equilibrium objects are accessed
+        through their public attributes only.
+
+        Parameters
+        ----------
+        eq : desc.equilibrium.Equilibrium or path-like
+            A DESC equilibrium object, or a path to a DESC HDF5 output file
+            (the last equilibrium is used if the file contains a family).
+        emission_density : callable or numpy.ndarray
+            Either a callable ``S(rho)`` evaluated at the radial grid points,
+            or an array of length ``n_rho`` (arbitrary units, must be >= 0).
+        energy : openmc.stats.Univariate or Sequence[openmc.stats.Univariate]
+            Energy distribution(s); see the class docstring.
+        n_rho : int
+            Number of radial surfaces to extract (default: 33).
+        **kwargs
+            Additional keyword arguments passed to the constructor
+            (e.g. ``time``, ``strength``, ``constraints``).
+
+        Returns
+        -------
+        openmc.StellaratorSource
+
+        """
+        cv.check_greater_than('n_rho', n_rho, 1)
+        rho = np.linspace(0.0, 1.0, n_rho)
+
+        r_modes, r_lmn, z_modes, z_lmn, nfp = cls._desc_spectral_data(eq)
+
+        # Collapse the Zernike radial dependence onto the rho grid, giving
+        # product-form double Fourier coefficients for each surface, then
+        # convert to combined form
+        surface_tables = []
+        radial_r = np.column_stack([
+            x * cls._zernike_radial(rho, l, m)
+            for (l, m, n), x in zip(r_modes, r_lmn)])
+        radial_z = np.column_stack([
+            x * cls._zernike_radial(rho, l, m)
+            for (l, m, n), x in zip(z_modes, z_lmn)])
+        for i in range(n_rho):
+            table_r, table_z = {}, {}
+            cls._desc_to_combined(r_modes[:, 1], r_modes[:, 2],
+                                  radial_r[i], table_r)
+            cls._desc_to_combined(z_modes[:, 1], z_modes[:, 2],
+                                  radial_z[i], table_z)
+            surface_tables.append((table_r, table_z))
+
+        # Union of modes across R, Z, and all surfaces
+        modes = sorted({key for table_r, table_z in surface_tables
+                        for key in (*table_r, *table_z)})
+        mode_m = np.array([m for m, _ in modes], dtype=int)
+        mode_n = np.array([n for _, n in modes], dtype=int)
+
+        n_modes = len(modes)
+        rmnc = np.zeros((n_rho, n_modes))
+        rmns = np.zeros((n_rho, n_modes))
+        zmnc = np.zeros((n_rho, n_modes))
+        zmns = np.zeros((n_rho, n_modes))
+        for i, (table_r, table_z) in enumerate(surface_tables):
+            for k, key in enumerate(modes):
+                if key in table_r:
+                    rmnc[i, k], rmns[i, k] = table_r[key]
+                if key in table_z:
+                    zmnc[i, k], zmns[i, k] = table_z[key]
+
+        # m to cm
+        rmnc *= 100.0
+        rmns *= 100.0
+        zmnc *= 100.0
+        zmns *= 100.0
+
+        # Drop the asymmetric tables for stellarator-symmetric equilibria
+        sym = not (np.any(rmns) or np.any(zmnc))
+
+        return cls(
+            rho=rho,
+            emission_density=cls._evaluate_emission_density(
+                emission_density, rho),
+            mode_m=mode_m,
+            mode_n=mode_n,
+            rmnc=rmnc,
+            zmns=zmns,
+            rmns=None if sym else rmns,
+            zmnc=None if sym else zmnc,
+            num_field_periods=nfp,
+            energy=energy,
+            **kwargs
+        )
+
+    def populate_xml_element(self, element):
+        """Add necessary stellarator source information to an XML element
+
+        Returns
+        -------
+        element : lxml.etree._Element
+            XML element containing source data
+
+        """
+        self._validate()
+
+        ET.SubElement(element, "num_field_periods").text = \
+            str(self.num_field_periods)
+        ET.SubElement(element, "rho").text = \
+            ' '.join(str(r) for r in self.rho)
+        ET.SubElement(element, "emission_density").text = \
+            ' '.join(str(s) for s in self.emission_density)
+        ET.SubElement(element, "mode_m").text = \
+            ' '.join(str(m) for m in self.mode_m)
+        ET.SubElement(element, "mode_n").text = \
+            ' '.join(str(n) for n in self.mode_n)
+
+        # Coefficient tables flattened row-major (surface index varies slowest)
+        for name in ('rmnc', 'zmns', 'rmns', 'zmnc'):
+            coeff = getattr(self, name)
+            if coeff is not None:
+                ET.SubElement(element, name).text = \
+                    ' '.join(str(c) for c in coeff.ravel())
+
+        # Energy distribution(s)
+        for dist in self.energy:
+            element.append(dist.to_xml_element('energy'))
+
+        # Time distribution
+        if self.time is not None:
+            element.append(self.time.to_xml_element('time'))
+
+    @classmethod
+    def from_xml_element(cls, elem: ET.Element) -> StellaratorSource:
+        """Generate stellarator source from an XML element
+
+        Parameters
+        ----------
+        elem : lxml.etree._Element
+            XML element
+
+        Returns
+        -------
+        openmc.StellaratorSource
+            Source generated from XML element
+
+        """
+        nfp_text = get_text(elem, 'num_field_periods')
+        num_field_periods = int(nfp_text) if nfp_text else 1
+
+        rho = np.array(get_text(elem, 'rho').split(), dtype=float)
+        emission_density = np.array(
+            get_text(elem, 'emission_density').split(), dtype=float)
+        mode_m = np.array(get_text(elem, 'mode_m').split(), dtype=int)
+        mode_n = np.array(get_text(elem, 'mode_n').split(), dtype=int)
+
+        shape = (len(rho), len(mode_m))
+        coeffs = {}
+        for name in ('rmnc', 'zmns', 'rmns', 'zmnc'):
+            text = get_text(elem, name)
+            coeffs[name] = (np.array(text.split(), dtype=float).reshape(shape)
+                            if text else None)
+
+        # Read energy distributions
+        energy = [Univariate.from_xml_element(e) for e in elem.findall('energy')]
+        if len(energy) == 1:
+            energy = energy[0]
+
+        # Read time distribution
+        time_elem = elem.find('time')
+        time = Univariate.from_xml_element(time_elem) if time_elem is not None else None
+
+        # Read constraints and strength
+        constraints = cls._get_constraints(elem)
+        strength_text = get_text(elem, 'strength')
+        strength = float(strength_text) if strength_text else 1.0
+
+        return cls(
+            rho=rho,
+            emission_density=emission_density,
+            mode_m=mode_m,
+            mode_n=mode_n,
+            rmnc=coeffs['rmnc'],
+            zmns=coeffs['zmns'],
+            rmns=coeffs['rmns'],
+            zmnc=coeffs['zmnc'],
+            num_field_periods=num_field_periods,
+            energy=energy,
+            time=time,
             strength=strength,
             constraints=constraints
         )
