@@ -338,6 +338,50 @@ are born at :math:`t=0`. The toroidal extent can be restricted with
 ``phi_start`` and ``phi_extent`` to model a sector of the plasma, and
 ``vertical_shift`` translates the plasma center along the z-axis.
 
+Stellarator Plasma Sources
+--------------------------
+
+For fully three-dimensional plasmas, the :class:`openmc.StellaratorSource`
+class samples neutron positions from the flux-surface Fourier representation
+shared by the `VMEC <https://doi.org/10.1063/1.864116>`_ and `DESC
+<https://doi.org/10.1088/1741-4326/ac6b06>`_ equilibrium codes. The plasma is
+described in flux coordinates :math:`(\rho, \theta, \zeta)`, where
+:math:`\rho = \sqrt{s}` is the square root of the normalized toroidal flux
+(proportional to the average minor radius), :math:`\theta` is the poloidal
+angle, and :math:`\zeta` is the toroidal angle (identical to the cylindrical
+azimuthal angle in both codes). The user provides the Fourier coefficients of
+:math:`R(\rho,\theta,\zeta)` and :math:`Z(\rho,\theta,\zeta)` on a radial grid
+together with an emission density :math:`S(\rho)` that is constant on flux
+surfaces. The radial coordinate is sampled by inverting a tabulated CDF of the
+exact marginal distribution :math:`S(\rho)\, V'(\rho)` and the two angles are
+sampled from the conditional distribution
+:math:`p(\theta,\zeta|\rho) \propto R\,|\tau|` (with :math:`\tau` the
+poloidal-plane Jacobian) by rejection.
+
+Sources are most conveniently created directly from equilibrium code output::
+
+  # From a VMEC wout NetCDF file
+  source = openmc.StellaratorSource.from_vmec(
+      'wout_w7x.nc',
+      emission_density=lambda rho: (1.0 - rho**2)**2,
+      energy=openmc.stats.muir(e0=14.08e6, m_rat=5.0, kt=20000.0),
+  )
+
+  # From a DESC equilibrium object or HDF5 output file
+  source = openmc.StellaratorSource.from_desc(
+      eq,  # a desc.equilibrium.Equilibrium or path to a DESC HDF5 file
+      emission_density=lambda rho: (1.0 - rho**2)**2,
+      energy=openmc.stats.muir(e0=14.08e6, m_rat=5.0, kt=20000.0),
+  )
+
+The ``emission_density`` argument accepts either a callable evaluated on the
+radial grid or an array with one value per radial surface; only its shape
+matters, since it is normalized internally. The Fourier coefficient tables can
+also be passed directly to the constructor (in centimeters) for equilibria from
+other sources. As with :class:`openmc.TokamakSource`, the ``energy`` argument
+accepts a single distribution or one distribution per radial grid point, and a
+``time`` distribution may optionally be given.
+
 File-based Sources
 ------------------
 

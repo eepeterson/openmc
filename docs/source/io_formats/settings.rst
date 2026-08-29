@@ -778,8 +778,8 @@ attributes/sub-elements:
 
   :type:
     Indicator of source type. One of ``independent``, ``file``, ``compiled``,
-    ``mesh``, or ``tokamak``. The type of the source will be determined by this
-    attribute if it is present.
+    ``mesh``, ``tokamak``, or ``stellarator``. The type of the source will be
+    determined by this attribute if it is present.
 
   :particle:
     The source particle type, specified as a PDG number or a string alias (e.g.,
@@ -1081,6 +1081,83 @@ attributes/sub-elements:
     probability proportional to the proximity of the radius to each grid point
     (stochastic interpolation). Each follows the format of a univariate
     probability distribution (see :ref:`univariate`).
+
+  :time:
+    An optional ``time`` sub-element specifying the time distribution of source
+    particles, following the format of a univariate probability distribution
+    (see :ref:`univariate`).
+
+    *Default*: particles are born at :math:`t=0`
+
+  For a source with ``type="stellarator"``, the spatial distribution is
+  described by the flux-surface Fourier representation shared by the VMEC and
+  DESC equilibrium codes, using flux coordinates :math:`(\rho, \theta, \zeta)`
+  where :math:`\rho = \sqrt{s}` is the square root of the normalized toroidal
+  flux, :math:`\theta` is the poloidal angle, and :math:`\zeta` is the toroidal
+  (cylindrical) angle:
+
+  .. math::
+
+      \begin{aligned}
+      R &= \sum_k \left[ R^c_k(\rho) \cos(m_k\theta - n_k N_{fp} \zeta)
+           + R^s_k(\rho) \sin(m_k\theta - n_k N_{fp}\zeta) \right] \\
+      Z &= \sum_k \left[ Z^s_k(\rho) \sin(m_k\theta - n_k N_{fp}\zeta)
+           + Z^c_k(\rho) \cos(m_k\theta - n_k N_{fp}\zeta) \right]
+      \end{aligned}
+
+  The following sub-elements are used instead of the ``space`` element:
+
+  :num_field_periods:
+    The number of field periods :math:`N_{fp}`.
+
+    *Default*: 1
+
+  :rho:
+    A list of radial grid points :math:`\rho = \sqrt{s}`. Must be strictly
+    increasing, start at 0, and end at 1.
+
+  :emission_density:
+    A list of neutron emission densities :math:`S(\rho)` evaluated at each
+    ``rho`` grid point (arbitrary units, must be non-negative). Only the shape
+    matters, since the profile is normalized internally. Must have the same
+    length as ``rho`` and contain at least one positive value.
+
+  :mode_m:
+    A list of poloidal mode numbers :math:`m_k` (must be non-negative).
+
+  :mode_n:
+    A list of toroidal mode numbers :math:`n_k` in units of the number of
+    field periods (i.e., VMEC's ``xn`` divided by ``nfp``). Must have the same
+    length as ``mode_m``.
+
+  :rmnc:
+    The cosine Fourier coefficients of :math:`R` in [cm], flattened row-major
+    with the surface index varying slowest (length
+    ``len(rho)*len(mode_m)``).
+
+  :zmns:
+    The sine Fourier coefficients of :math:`Z` in [cm], in the same layout as
+    ``rmnc``.
+
+  :rmns:
+    The sine Fourier coefficients of :math:`R` in [cm] for
+    non-stellarator-symmetric equilibria. If given, ``zmnc`` must also be
+    given.
+
+    *Default*: None
+
+  :zmnc:
+    The cosine Fourier coefficients of :math:`Z` in [cm] for
+    non-stellarator-symmetric equilibria. If given, ``rmns`` must also be
+    given.
+
+    *Default*: None
+
+  :energy:
+    For a stellarator source, one or more ``energy`` sub-elements specify the
+    neutron energy distribution(s) with the same semantics as for the tokamak
+    source: either a single distribution used at all radii, or exactly one
+    distribution per ``rho`` grid point.
 
   :time:
     An optional ``time`` sub-element specifying the time distribution of source
