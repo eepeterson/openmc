@@ -1984,8 +1984,7 @@ class StellaratorSource(SourceBase):
             Source generated from XML element
 
         """
-        nfp_text = get_text(elem, 'num_field_periods')
-        num_field_periods = int(nfp_text) if nfp_text else 1
+        num_field_periods = int(get_text(elem, 'num_field_periods', 1))
 
         rho = np.array(get_text(elem, 'rho').split(), dtype=float)
         emission_density = np.array(
@@ -2002,8 +2001,6 @@ class StellaratorSource(SourceBase):
 
         # Read energy distributions
         energy = [Univariate.from_xml_element(e) for e in elem.findall('energy')]
-        if len(energy) == 1:
-            energy = energy[0]
 
         # Read time distribution
         time_elem = elem.find('time')
@@ -2011,8 +2008,7 @@ class StellaratorSource(SourceBase):
 
         # Read constraints and strength
         constraints = cls._get_constraints(elem)
-        strength_text = get_text(elem, 'strength')
-        strength = float(strength_text) if strength_text else 1.0
+        strength = float(get_text(elem, 'strength', 1.0))
 
         return cls(
             rho=rho,
