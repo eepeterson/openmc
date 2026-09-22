@@ -340,6 +340,18 @@ private:
   //! \return Position in Cartesian coordinates [cm]
   Position flux_to_cartesian(double r, double alpha, double phi) const;
 
+  //! Interpolate the safety factor on the normalized minor-radius grid
+  //! \param r_norm Normalized minor radius r/a
+  //! \return Interpolated safety factor q(r/a)
+  double interp_q(double r_norm) const;
+
+  //! Evaluate the local magnetic-field direction at a sampled birth point
+  //! \param r Minor radius [cm]
+  //! \param alpha Poloidal angle [rad]
+  //! \param phi Toroidal angle [rad]
+  //! \return Unit field direction in Cartesian coordinates
+  Direction field_direction(double r, double alpha, double phi) const;
+
   //==========================================================================
   // Data members
 
@@ -353,8 +365,17 @@ private:
   // Time distribution (defaults to a delta distribution at t=0)
   UPtrDist time_;
 
-  // Angular distribution (isotropic)
+  // Angular distribution (isotropic fallback)
   UPtrAngle angle_;
+
+  // Spin-polarized-fusion emission. All state is fixed at construction and
+  // read-only during sample(), preserving source thread safety.
+  bool polarized_ {false}; //!< Whether to use the polarized direction sampler
+  double p_perp_ {0.0};    //!< Probability of selecting the sin^2(theta) mode
+  bool pitched_field_ {false}; //!< Whether to include q-profile field pitch
+  double field_sign_ {1.0};    //!< Handedness of the poloidal field component
+  vector<double> q_r_over_a_;  //!< Normalized-radius grid for q
+  vector<double> q_values_;    //!< Safety factor q(r/a)
 
   // Tokamak geometry parameters
   double major_radius_;    //!< Major radius R0 [cm]
@@ -471,6 +492,16 @@ private:
   double eval_density(int bin, double t, double theta, double zeta,
     double* R_out = nullptr, double* Z_out = nullptr) const;
 
+  //! Evaluate the local VMEC magnetic-field direction
+  //! \param bin Geometry radial bin index
+  //! \param t Interpolation parameter within the geometry bin
+  //! \param rho Normalized radial coordinate
+  //! \param theta VMEC poloidal angle [rad]
+  //! \param zeta VMEC toroidal angle [rad]
+  //! \return Unit magnetic-field direction in Cartesian coordinates
+  Direction field_direction(
+    int bin, double t, double rho, double theta, double zeta) const;
+
   //! Sample energy from the distribution(s)
   //! \param rho Normalized radial coordinate (for distribution selection)
   //! \param seed Pseudorandom seed pointer
@@ -495,6 +526,15 @@ private:
   vector<double> rmns_; //!< sin coefficients of R (non-symmetric only)
   vector<double> zmnc_; //!< cos coefficients of Z (non-symmetric only)
   bool asym_ {false};   //!< Whether non-stellarator-symmetric terms present
+
+  // Spin-polarized fusion direction model (optional)
+  bool polarized_ {false};   //!< Whether SPF angular sampling is enabled
+  double p_perp_ {0.0};      //!< Probability of the perpendicular SPF shape
+  vector<double> field_rho_; //!< Radial grid for iota/lambda field data
+  vector<double> iota_;      //!< Rotational transform on field_rho_
+  vector<double> lmns_;      //!< sin coefficients of VMEC lambda [field x mode]
+  vector<double> lmnc_;      //!< cos coefficients of lambda (asymmetric only)
+  bool lambda_asym_ {false}; //!< Whether lmnc_ terms are present
 
   // Energy distribution(s): either 1 for all rho, or one per rho point
   vector<unique_ptr<Distribution>> energy_dists_;

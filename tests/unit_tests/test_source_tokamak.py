@@ -76,6 +76,84 @@ def test_tokamak_source_multiple_energies():
     assert len(new.energy) == len(r_over_a)
 
 
+def test_spin_fractions_to_abc():
+    assert openmc.spin_fractions_to_abc(
+        1 / 3, 1 / 3, 1 / 3, 1 / 2, 1 / 2) == pytest.approx(
+            (1 / 3, 1 / 3, 1 / 3))
+    assert openmc.spin_fractions_to_abc(1, 0, 0, 1, 0) == (1, 0, 0)
+
+
+def test_tokamak_source_unpolarized_xml_unchanged():
+    elem = make_source().to_xml_element()
+    for name in ('polarization', 'field_model', 'q_r_over_a', 'q_values',
+                 'field_sign'):
+        assert elem.find(name) is None
+
+
+def test_tokamak_source_polarization_normalization():
+    with pytest.warns(UserWarning, match='renormalizing'):
+        src = make_source(polarization=(2.0, 1.0, 1.0))
+    assert src.polarization == pytest.approx((0.5, 0.25, 0.25))
+
+
+@pytest.mark.parametrize("polarization", [
+    (-0.1, 0.5, 0.6),
+    (0.0, 0.0, 0.0),
+    (np.nan, 0.5, 0.5),
+    (0.5, 0.5),
+    {'d_plus': 0.5, 'd_zero': 0.5, 'd_minus': 0.0,
+     't_plus': 0.5},
+    {'d_plus': 0.5, 'd_zero': 0.5, 'd_minus': 0.5,
+     't_plus': 0.5, 't_minus': 0.5},
+])
+def test_tokamak_source_invalid_polarization(polarization):
+    with pytest.raises((TypeError, ValueError)):
+        make_source(polarization=polarization)
+
+
+def test_tokamak_source_spin_fraction_input():
+    src = make_source(polarization={
+        'd_plus': 1.0, 'd_zero': 0.0, 'd_minus': 0.0,
+        't_plus': 1.0, 't_minus': 0.0,
+    })
+    assert src.polarization == (1.0, 0.0, 0.0)
+
+
+def test_tokamak_source_polarization_roundtrip():
+    q_r = np.linspace(0.0, 1.0, 5)
+    q = 1.0 + 2.0 * q_r**2
+    src = make_source(
+        polarization=(0.5, 0.3, 0.2), field_model='pitched',
+        safety_factor=(q_r, q), field_sign=-1)
+
+    new = openmc.SourceBase.from_xml_element(src.to_xml_element())
+    assert new.polarization == pytest.approx(src.polarization)
+    assert new.field_model == 'pitched'
+    np.testing.assert_allclose(new.safety_factor[0], q_r)
+    np.testing.assert_allclose(new.safety_factor[1], q)
+    assert new.field_sign == -1
+
+
+@pytest.mark.parametrize("safety_factor", [
+    ([0.0], [1.0]),
+    ([0.1, 1.0], [1.0, 2.0]),
+    ([0.0, 0.9], [1.0, 2.0]),
+    ([0.0, 0.8, 0.7, 1.0], [1.0, 1.5, 2.0, 2.5]),
+    ([0.0, 1.0], [1.0, 0.0]),
+    ([0.0, 1.0], [1.0, np.nan]),
+])
+def test_tokamak_source_invalid_safety_factor(safety_factor):
+    with pytest.raises(ValueError):
+        make_source(
+            polarization=(1.0, 0.0, 0.0), field_model='pitched',
+            safety_factor=safety_factor)
+
+
+def test_tokamak_source_pitched_requires_safety_factor():
+    with pytest.raises(ValueError, match='requires a safety_factor'):
+        make_source(polarization=(1.0, 0.0, 0.0), field_model='pitched')
+
+
 @pytest.mark.parametrize("kwargs, match", [
     (dict(minor_radius=700.0), "smaller than major_radius"),
     (dict(shafranov_shift=150.0), "half the minor_radius"),
@@ -261,3 +339,90 @@ def test_tokamak_source_sampling(run_in_tmpdir):
 
     assert_sample_mean(R, expected_R)
     assert_sample_mean((z - zshift)**2, expected_z2)
+
+
+@pytest.mark.parametrize(("polarization", "expected_cos2"), [
+    ((1.0, 0.0, 0.0), 1.0 / 5.0),
+    ((1.0, 1.0, 1.0), 1.0 / 3.0),
+    ((0.0, 1.0, 0.0), 7.0 / 15.0),
+    ((0.0, 0.0, 1.0), 7.0 / 15.0),
+])
+def test_tokamak_source_polarized_direction_sampling(
+    run_in_tmpdir, polarization, expected_cos2
+):
+    """Check the compiled SPF direction sampler about a toroidal field."""
+    src = make_source(
+        polarization=polarization,
+        field_model='toroidal',
+        energy=openmc.stats.delta_function(14.07e6),
+    )
+    sphere = openmc.Sphere(r=2000.0, boundary_type='vacuum')
+    model = openmc.Model(
+        geometry=openmc.Geometry([openmc.Cell(region=-sphere)]),
+        settings=openmc.Settings(
+            particles=100, batches=1, run_mode='fixed source', source=src),
+    )
+
+    sites = model.sample_external_source(40_000)
+    xyz = np.asarray([site.r for site in sites])
+    directions = np.asarray([site.u for site in sites])
+    cylindrical_r = np.hypot(xyz[:, 0], xyz[:, 1])
+    b_hat = np.column_stack((
+        -xyz[:, 1] / cylindrical_r,
+        xyz[:, 0] / cylindrical_r,
+        np.zeros(len(sites)),
+    ))
+    cos2 = np.sum(directions * b_hat, axis=1)**2
+
+    np.testing.assert_allclose(np.linalg.norm(directions, axis=1), 1.0,
+                               rtol=0.0, atol=1.0e-14)
+    assert_sample_mean(cos2, expected_cos2)
+
+
+def test_tokamak_source_pitched_direction_sampling(run_in_tmpdir):
+    """Check the compiled q-pitched field in an analytically invertible torus."""
+    R0, minor_radius, q_value = 620.0, 200.0, 2.0
+    q_r = np.array([0.0, 1.0])
+    src = make_source(
+        major_radius=R0,
+        minor_radius=minor_radius,
+        elongation=1.0,
+        triangularity=0.0,
+        shafranov_shift=0.0,
+        polarization=(1.0, 0.0, 0.0),
+        field_model='pitched',
+        safety_factor=(q_r, np.full_like(q_r, q_value)),
+        field_sign=-1,
+        energy=openmc.stats.delta_function(14.07e6),
+    )
+    sphere = openmc.Sphere(r=2000.0, boundary_type='vacuum')
+    model = openmc.Model(
+        geometry=openmc.Geometry([openmc.Cell(region=-sphere)]),
+        settings=openmc.Settings(
+            particles=100, batches=1, run_mode='fixed source', source=src),
+    )
+
+    sites = model.sample_external_source(40_000)
+    xyz = np.asarray([site.r for site in sites])
+    directions = np.asarray([site.u for site in sites])
+    R = np.hypot(xyz[:, 0], xyz[:, 1])
+    phi = np.arctan2(xyz[:, 1], xyz[:, 0])
+    radial_offset = R - R0
+    minor_r = np.hypot(radial_offset, xyz[:, 2])
+    alpha = np.arctan2(xyz[:, 2], radial_offset)
+
+    # For the circular case the unit poloidal tangent is
+    # (-sin(alpha))*R-hat + cos(alpha)*z-hat.
+    pitch = -minor_r / (q_value * R)
+    poloidal_R = -np.sin(alpha)
+    poloidal_Z = np.cos(alpha)
+    B = np.column_stack((
+        -np.sin(phi) + pitch * poloidal_R * np.cos(phi),
+        np.cos(phi) + pitch * poloidal_R * np.sin(phi),
+        pitch * poloidal_Z,
+    ))
+    B /= np.linalg.norm(B, axis=1)[:, np.newaxis]
+    cos2 = np.sum(directions * B, axis=1)**2
+
+    assert np.max(np.abs(B[:, 2])) > 1.0e-3
+    assert_sample_mean(cos2, 1.0 / 5.0)

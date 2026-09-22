@@ -338,6 +338,41 @@ are born at :math:`t=0`. The toroidal extent can be restricted with
 ``phi_start`` and ``phi_extent`` to model a sector of the plasma, and
 ``vertical_shift`` translates the plasma center along the z-axis.
 
+Spin-polarized D--T emission
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Both plasma-source classes can sample the spin-polarized D--T birth-direction
+distribution about the local magnetic-field direction. The ``polarization``
+argument accepts the three nonnegative collision-mode fractions ``(a, b, c)``
+or a dictionary containing the deuteron fractions ``d_plus``, ``d_zero``, and
+``d_minus`` and the triton fractions ``t_plus`` and ``t_minus``. The helper
+:func:`openmc.spin_fractions_to_abc` performs the same spin-state conversion
+explicitly. Input mode fractions are normalized internally; they specify the
+conditional angular distribution, while the total source rate remains set by
+the source ``strength``.
+
+For a tokamak, ``field_model='toroidal'`` uses the local toroidal direction.
+The ``'pitched'`` model additionally requires a positive safety-factor profile
+on normalized minor radius and follows the Miller-surface poloidal tangent::
+
+  source = openmc.TokamakSource(
+      major_radius=620.0,
+      minor_radius=200.0,
+      r_over_a=r_over_a,
+      emission_density=emission,
+      energy=openmc.stats.delta_function(14.1e6),
+      polarization={
+          'd_plus': 1.0, 'd_zero': 0.0, 'd_minus': 0.0,
+          't_plus': 1.0, 't_minus': 0.0,
+      },
+      field_model='pitched',
+      safety_factor=(r_over_a, 1.0 + 2.0*r_over_a**2),
+  )
+
+Leaving ``polarization`` unset preserves isotropic emission and the legacy
+random-number sequence. Explicit ``(1/3, 1/3, 1/3)`` mode fractions also give
+an isotropic angular distribution, but exercise the polarized sampler.
+
 Stellarator Plasma Sources
 --------------------------
 
@@ -381,6 +416,18 @@ also be passed directly to the constructor (in centimeters) for equilibria from
 other sources. As with :class:`openmc.TokamakSource`, the ``energy`` argument
 accepts a single distribution or one distribution per radial grid point, and a
 ``time`` distribution may optionally be given.
+
+When ``polarization`` is passed to :meth:`StellaratorSource.from_vmec`, the
+rotational transform and VMEC lambda coefficients are read from the wout file
+and used to evaluate the local field direction at each accepted birth point.
+The classic VMEC half mesh and the VMEC++ full-mesh form are handled
+explicitly. :meth:`StellaratorSource.from_desc` likewise extracts the DESC
+stream-function ``lambda`` (folded from its Fourier--Zernike basis into the same
+combined form as the geometry) and the rotational transform, evaluated on the
+radial grid. The reconstructed field direction is validated against DESC's own
+computed field to better than a degree and converges with ``n_rho``. Passing
+``field_rho``, ``iota``, and ``lmns`` explicitly overrides the native
+extraction; unpolarized DESC sources are unchanged.
 
 File-based Sources
 ------------------

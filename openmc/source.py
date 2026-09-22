@@ -900,6 +900,87 @@ class FileSource(SourceBase):
         return cls(**kwargs)
 
 
+def spin_fractions_to_abc(d_plus, d_zero, d_minus, t_plus, t_minus):
+    r"""Schwartz (2025) Eq. 1 collision-mode fractions from fuel spin fractions.
+
+    A spin-polarized D--T reaction splits into three angular modes with fractions
+    :math:`(a, b, c)`. Given the deuteron spin-projection fractions
+    ``(d_plus, d_zero, d_minus)`` and the triton fractions ``(t_plus, t_minus)`` --
+    each set summing to 1 -- the mode fractions are
+
+    .. math::
+
+        a &= d_+ t_+ + d_- t_-  \quad (\text{the } \tfrac34\sin^2\theta \text{ shape})\\
+        b &= d_0                \quad (\text{transverse deuteron, } m=0)\\
+        c &= d_+ t_- + d_- t_+  \quad (\text{shares the B-mode shape})
+
+    Non-polarized fuel gives :math:`a = b = c = 1/3`. Mirrors the sympy-verified
+    identities in the SPF prototype's ``abc_modes`` and feeds the ``polarization``
+    argument of :class:`TokamakSource` and :class:`StellaratorSource`.
+
+    Parameters
+    ----------
+    d_plus, d_zero, d_minus : float
+        Deuteron spin-projection fractions (sum to 1).
+    t_plus, t_minus : float
+        Triton spin-projection fractions (sum to 1).
+
+    Returns
+    -------
+    tuple of float
+        The mode fractions ``(a, b, c)``.
+    """
+    a = d_plus * t_plus + d_minus * t_minus
+    b = d_zero
+    c = d_plus * t_minus + d_minus * t_plus
+    return a, b, c
+
+
+def _normalize_spf_polarization(value):
+    """Validate and normalize an SPF ``(a, b, c)`` specification."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        keys = {'d_plus', 'd_zero', 'd_minus', 't_plus', 't_minus'}
+        if set(value) != keys:
+            raise ValueError(
+                f'polarization spin-fraction dictionary must have keys '
+                f'{sorted(keys)}')
+        for name, fraction in value.items():
+            cv.check_type(f'polarization {name}', fraction, Real)
+            if not np.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+                raise ValueError(
+                    f'polarization {name} must be finite and in [0, 1]')
+        d_sum = value['d_plus'] + value['d_zero'] + value['d_minus']
+        t_sum = value['t_plus'] + value['t_minus']
+        if not np.isclose(d_sum, 1.0) or not np.isclose(t_sum, 1.0):
+            raise ValueError(
+                'deuteron and triton spin fractions must each sum to 1')
+        a, b, c = spin_fractions_to_abc(
+            value['d_plus'], value['d_zero'], value['d_minus'],
+            value['t_plus'], value['t_minus'])
+    else:
+        try:
+            a, b, c = value
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                'polarization must be an (a, b, c) sequence or a '
+                'spin-fraction dictionary') from exc
+    for name, x in (('a', a), ('b', b), ('c', c)):
+        cv.check_type(f'polarization {name}', x, Real)
+        if not np.isfinite(x):
+            raise ValueError(f'polarization {name} must be finite')
+        cv.check_greater_than(f'polarization {name}', x, 0.0, equality=True)
+    total = a + b + c
+    if total <= 0.0:
+        raise ValueError('polarization (a,b,c) must sum to a positive value.')
+    if abs(total - 1.0) > 1e-6:
+        warnings.warn(
+            f'polarization (a,b,c) sums to {total}, renormalizing to 1.',
+            stacklevel=3)
+    return a / total, b / total, c / total
+
+
 class TokamakSource(SourceBase):
     r"""A source representing neutron emission from a tokamak plasma.
 
@@ -968,6 +1049,19 @@ class TokamakSource(SourceBase):
     constraints : dict
         Constraints on sampled source particles. See :class:`SourceBase` for
         valid keys and values.
+    polarization : sequence of float or dict, optional
+        Spin-polarized D--T collision-mode fractions ``(a, b, c)`` from
+        Schwartz (2025), or a dictionary containing ``d_plus``, ``d_zero``,
+        ``d_minus``, ``t_plus``, and ``t_minus`` spin-state fractions. If
+        omitted, source directions remain isotropic.
+    field_model : {'toroidal', 'pitched'}, optional
+        Magnetic-field direction about which polarized directions are sampled.
+        The pitched model uses the Miller poloidal tangent and ``safety_factor``.
+    safety_factor : tuple of array-like, optional
+        Arrays ``(r_over_a, q)`` defining a positive safety-factor profile.
+        Required for polarized emission with ``field_model='pitched'``.
+    field_sign : {1, -1}, optional
+        Handedness of the pitched field's poloidal component.
 
     Attributes
     ----------
@@ -1003,6 +1097,14 @@ class TokamakSource(SourceBase):
         Indicator of source type: 'tokamak'
     constraints : dict
         Constraints on sampled source particles
+    polarization : tuple of float or None
+        Normalized collision-mode fractions ``(a, b, c)``.
+    field_model : str
+        Magnetic-field direction model.
+    safety_factor : tuple of numpy.ndarray or None
+        Safety-factor radial grid and values.
+    field_sign : int
+        Handedness of the pitched field's poloidal component.
 
     """
 
@@ -1022,7 +1124,11 @@ class TokamakSource(SourceBase):
         n_alpha: int = 101,
         vertical_shift: float = 0.0,
         strength: float = 1.0,
-        constraints: dict[str, Any] | None = None
+        constraints: dict[str, Any] | None = None,
+        polarization=None,
+        field_model: str = 'toroidal',
+        safety_factor=None,
+        field_sign: int = 1,
     ):
         super().__init__(strength=strength, constraints=constraints)
         self.major_radius = major_radius
@@ -1039,10 +1145,23 @@ class TokamakSource(SourceBase):
         self.energy = energy
         self.time = time
 
+        # SPF: default polarization=None => unpolarized => isotropic (identical
+        # to the pre-SPF behavior; nothing is written to XML).
+        self.polarization = polarization
+        self.field_model = field_model
+        self.safety_factor = safety_factor
+        self.field_sign = field_sign
+
         self._validate()
 
     def _validate(self):
         """Validate relationships between tokamak source parameters."""
+        # SPF cross-field check (each setter validates its own field; the
+        # relationship between fields is verified here).
+        if self.polarization is not None and self.field_model == 'pitched' \
+                and self.safety_factor is None:
+            raise ValueError(
+                "field_model='pitched' requires a safety_factor=(r_over_a, q).")
         if self.minor_radius >= self.major_radius:
             raise ValueError(
                 f"minor_radius ({self.minor_radius}) must be smaller than "
@@ -1213,6 +1332,62 @@ class TokamakSource(SourceBase):
         cv.check_type('vertical shift', value, Real)
         self._vertical_shift = value
 
+    @property
+    def polarization(self):
+        """None or (a, b, c) mode fractions (Schwartz 2025)."""
+        return self._polarization
+
+    @polarization.setter
+    def polarization(self, value):
+        self._polarization = _normalize_spf_polarization(value)
+
+    @property
+    def field_model(self) -> str:
+        """Magnetic-field direction model: 'toroidal' (b-hat=phi-hat) or 'pitched'."""
+        return self._field_model
+
+    @field_model.setter
+    def field_model(self, value: str):
+        cv.check_value('field_model', value, ('toroidal', 'pitched'))
+        self._field_model = value
+
+    @property
+    def safety_factor(self):
+        """None or (r_over_a, q) tuple of arrays (pitched field only)."""
+        return self._safety_factor
+
+    @safety_factor.setter
+    def safety_factor(self, value):
+        if value is None:
+            self._safety_factor = None
+            return
+        r_q, q = value
+        r_q = np.asarray(r_q, dtype=float)
+        q = np.asarray(q, dtype=float)
+        if r_q.ndim != 1 or q.ndim != 1 or len(r_q) != len(q) or len(r_q) < 2:
+            raise ValueError(
+                'safety_factor must be (r_over_a, q) with equal length >= 2.')
+        if not np.all(np.isfinite(r_q)) or not np.all(np.isfinite(q)):
+            raise ValueError('safety_factor arrays must contain finite values')
+        if r_q[0] != 0.0 or r_q[-1] != 1.0:
+            raise ValueError('safety_factor r_over_a must start at 0 and end at 1')
+        if not np.all(np.diff(r_q) > 0.0):
+            raise ValueError(
+                'safety_factor r_over_a must be strictly increasing')
+        if not np.all(q > 0.0):
+            raise ValueError('safety_factor q values must be positive')
+        self._safety_factor = (r_q, q)
+
+    @property
+    def field_sign(self) -> int:
+        """Handedness s = +1 / -1 of the poloidal pitch (pitched field only)."""
+        return self._field_sign
+
+    @field_sign.setter
+    def field_sign(self, value: int):
+        cv.check_value('field_sign', value, (1, -1, 1.0, -1.0))
+        self._field_sign = int(value)
+
     def populate_xml_element(self, element):
         """Add necessary tokamak source information to an XML element
 
@@ -1253,6 +1428,19 @@ class TokamakSource(SourceBase):
         # Time distribution
         if self.time is not None:
             element.append(self.time.to_xml_element('time'))
+
+        # SPF: polarization (absent => unpolarized => isotropic, nothing written)
+        if self.polarization is not None:
+            a, b, c = self.polarization
+            ET.SubElement(element, "polarization").text = f"{a} {b} {c}"
+            ET.SubElement(element, "field_model").text = self.field_model
+            if self.field_model == 'pitched':
+                r_q, q = self.safety_factor
+                ET.SubElement(element, "q_r_over_a").text = \
+                    ' '.join(str(x) for x in r_q)
+                ET.SubElement(element, "q_values").text = \
+                    ' '.join(str(x) for x in q)
+                ET.SubElement(element, "field_sign").text = str(self.field_sign)
 
     @classmethod
     def from_xml_element(cls, elem: ET.Element) -> TokamakSource:
@@ -1307,6 +1495,21 @@ class TokamakSource(SourceBase):
         strength_text = get_text(elem, 'strength')
         strength = float(strength_text) if strength_text else 1.0
 
+        # SPF: polarization / field model / safety factor (all optional)
+        pol_text = get_text(elem, 'polarization')
+        polarization = (tuple(float(x) for x in pol_text.split())
+                        if pol_text else None)
+        field_model = get_text(elem, 'field_model') or 'toroidal'
+        safety_factor = None
+        q_r_text = get_text(elem, 'q_r_over_a')
+        q_v_text = get_text(elem, 'q_values')
+        if q_r_text and q_v_text:
+            safety_factor = (
+                np.array([float(x) for x in q_r_text.split()]),
+                np.array([float(x) for x in q_v_text.split()]))
+        field_sign_text = get_text(elem, 'field_sign')
+        field_sign = int(float(field_sign_text)) if field_sign_text else 1
+
         return cls(
             major_radius=major_radius,
             minor_radius=minor_radius,
@@ -1322,7 +1525,11 @@ class TokamakSource(SourceBase):
             n_alpha=n_alpha,
             vertical_shift=vertical_shift,
             strength=strength,
-            constraints=constraints
+            constraints=constraints,
+            polarization=polarization,
+            field_model=field_model,
+            safety_factor=safety_factor,
+            field_sign=field_sign,
         )
 
 
@@ -1408,6 +1615,21 @@ class StellaratorSource(SourceBase):
     constraints : dict
         Constraints on sampled source particles. See :class:`SourceBase` for
         valid keys and values.
+    polarization : sequence of float or dict, optional
+        Spin-polarized D--T collision-mode fractions ``(a, b, c)`` or the
+        corresponding deuteron/triton spin-state fractions. If omitted,
+        directions remain isotropic.
+    field_rho : numpy.ndarray, optional
+        Radial grid for the VMEC rotational-transform and lambda data. This is
+        commonly VMEC's half mesh and need not match ``rho``.
+    iota : numpy.ndarray, optional
+        Rotational transform on ``field_rho``. Required with ``polarization``.
+    lmns : numpy.ndarray, optional
+        Sine Fourier coefficients of VMEC's stream function lambda with shape
+        ``(len(field_rho), len(mode_m))``. Required with ``polarization``.
+    lmnc : numpy.ndarray, optional
+        Cosine Fourier coefficients of lambda for non-stellarator-symmetric
+        equilibria.
 
     Attributes
     ----------
@@ -1439,6 +1661,16 @@ class StellaratorSource(SourceBase):
         Indicator of source type: 'stellarator'
     constraints : dict
         Constraints on sampled source particles
+    polarization : tuple of float or None
+        Normalized collision-mode fractions ``(a, b, c)``.
+    field_rho : numpy.ndarray or None
+        Radial grid for field data.
+    iota : numpy.ndarray or None
+        Rotational transform on ``field_rho``.
+    lmns : numpy.ndarray or None
+        Sine coefficients of VMEC lambda.
+    lmnc : numpy.ndarray or None
+        Cosine coefficients of VMEC lambda.
 
     """
 
@@ -1456,7 +1688,12 @@ class StellaratorSource(SourceBase):
         zmnc: Sequence[Sequence[float]] | None = None,
         time: Univariate | None = None,
         strength: float = 1.0,
-        constraints: dict[str, Any] | None = None
+        constraints: dict[str, Any] | None = None,
+        polarization=None,
+        field_rho: Sequence[float] | None = None,
+        iota: Sequence[float] | None = None,
+        lmns: Sequence[Sequence[float]] | None = None,
+        lmnc: Sequence[Sequence[float]] | None = None,
     ):
         super().__init__(strength=strength, constraints=constraints)
         self.rho = rho
@@ -1470,6 +1707,11 @@ class StellaratorSource(SourceBase):
         self.num_field_periods = num_field_periods
         self.energy = energy
         self.time = time
+        self.polarization = polarization
+        self.field_rho = field_rho
+        self.iota = iota
+        self.lmns = lmns
+        self.lmnc = lmnc
 
         self._validate()
 
@@ -1502,6 +1744,28 @@ class StellaratorSource(SourceBase):
                 f"Number of energy distributions ({len(self.energy)}) must be "
                 f"either 1 or equal to the number of rho grid points "
                 f"({n_rho})")
+        field_values = (self.field_rho, self.iota, self.lmns)
+        if self.polarization is not None and any(x is None for x in field_values):
+            raise ValueError(
+                "polarized StellaratorSource requires field_rho, iota, and "
+                "lmns")
+        if self.polarization is None and any(x is not None for x in field_values):
+            raise ValueError(
+                "field_rho, iota, and lmns are only used with polarization")
+        if self.polarization is None and self.lmnc is not None:
+            raise ValueError("lmnc is only used with polarization")
+        if self.polarization is not None:
+            n_field = len(self.field_rho)
+            if len(self.iota) != n_field:
+                raise ValueError(
+                    "iota and field_rho must have the same length")
+            expected = (n_field, n_modes)
+            if self.lmns.shape != expected:
+                raise ValueError(f"lmns must have shape {expected}, got "
+                                 f"{self.lmns.shape}")
+            if self.lmnc is not None and self.lmnc.shape != expected:
+                raise ValueError(f"lmnc must have shape {expected}, got "
+                                 f"{self.lmnc.shape}")
 
     @property
     def type(self) -> str:
@@ -1604,6 +1868,66 @@ class StellaratorSource(SourceBase):
     @zmnc.setter
     def zmnc(self, value):
         self._zmnc = self._check_coeff('zmnc', value, none_ok=True)
+
+    @property
+    def polarization(self):
+        """None or normalized ``(a, b, c)`` SPF mode fractions."""
+        return self._polarization
+
+    @polarization.setter
+    def polarization(self, value):
+        self._polarization = _normalize_spf_polarization(value)
+
+    @property
+    def field_rho(self) -> np.ndarray | None:
+        return self._field_rho
+
+    @field_rho.setter
+    def field_rho(self, value):
+        if value is None:
+            self._field_rho = None
+            return
+        value = np.asarray(value, dtype=float)
+        if value.ndim != 1 or len(value) < 2:
+            raise ValueError(
+                "field_rho must be a 1-D array with at least 2 points")
+        if not np.all(np.isfinite(value)):
+            raise ValueError("field_rho must contain finite values")
+        if value[0] < 0.0 or value[-1] > 1.0:
+            raise ValueError("field_rho values must lie in [0, 1]")
+        if not np.all(np.diff(value) > 0.0):
+            raise ValueError("field_rho must be strictly increasing")
+        self._field_rho = value
+
+    @property
+    def iota(self) -> np.ndarray | None:
+        return self._iota
+
+    @iota.setter
+    def iota(self, value):
+        if value is None:
+            self._iota = None
+            return
+        value = np.asarray(value, dtype=float)
+        if value.ndim != 1 or not np.all(np.isfinite(value)):
+            raise ValueError("iota must be a 1-D array of finite values")
+        self._iota = value
+
+    @property
+    def lmns(self) -> np.ndarray | None:
+        return self._lmns
+
+    @lmns.setter
+    def lmns(self, value):
+        self._lmns = self._check_coeff('lmns', value, none_ok=True)
+
+    @property
+    def lmnc(self) -> np.ndarray | None:
+        return self._lmnc
+
+    @lmnc.setter
+    def lmnc(self, value):
+        self._lmnc = self._check_coeff('lmnc', value, none_ok=True)
 
     @property
     def num_field_periods(self) -> int:
@@ -1711,6 +2035,49 @@ class StellaratorSource(SourceBase):
             rmns = rmns * 100.0
             zmnc = zmnc * 100.0
 
+        # VMEC's field-line relation is
+        # B^theta/B^zeta = (iota - lambda_zeta)/(1 + lambda_theta).
+        # VMEC++ can export lambda on the full mesh. Classic wout files store
+        # lmns/lmnc and iotas on the half mesh, with row zero reserved as
+        # padding; preserve that native mesh instead of silently treating it
+        # as the full geometry mesh.
+        polarization = kwargs.pop('polarization', None)
+        field_data = {}
+        if polarization is not None:
+            lmns_raw = ds.get('lmns')
+            if lmns_raw is not None:
+                field_rho = np.sqrt(
+                    (np.arange(1, ns) - 0.5) / (ns - 1))
+                lmns = lmns_raw[1:]
+                lmnc_raw = ds.get('lmnc') if lasym else None
+                lmnc = lmnc_raw[1:] if lmnc_raw is not None else None
+                if ds.get('iotas') is not None:
+                    iota = ds['iotas'][1:]
+                elif ds.get('iotaf') is not None:
+                    iota = 0.5 * (ds['iotaf'][:-1] + ds['iotaf'][1:])
+                else:
+                    iota = None
+            elif ds.get('lmns_full') is not None:
+                field_rho = rho
+                iota = ds.get('iotaf')
+                lmns = ds['lmns_full']
+                lmnc = ds.get('lmnc_full') if lasym else None
+            else:
+                raise ValueError(
+                    "polarized VMEC source requires lmns or lmns_full in "
+                    "the wout file")
+            if iota is None:
+                raise ValueError(
+                    "polarized VMEC source requires iotas or iotaf in the "
+                    "wout file")
+            field_data = dict(
+                polarization=polarization,
+                field_rho=field_rho,
+                iota=iota,
+                lmns=lmns,
+                lmnc=lmnc,
+            )
+
         return cls(
             rho=rho,
             emission_density=cls._evaluate_emission_density(
@@ -1723,6 +2090,7 @@ class StellaratorSource(SourceBase):
             zmnc=zmnc,
             num_field_periods=nfp,
             energy=energy,
+            **field_data,
             **kwargs
         )
 
@@ -1734,7 +2102,8 @@ class StellaratorSource(SourceBase):
         HDF5-based and read with h5py.
         """
         names = ('rmnc', 'zmns', 'rmns', 'zmnc', 'xm', 'xn', 'nfp',
-                 'lasym__logical__')
+                 'lasym__logical__', 'iotaf', 'iotas', 'lmns', 'lmnc',
+                 'lmns_full', 'lmnc_full')
         try:
             from scipy.io import netcdf_file
             with netcdf_file(str(path), mmap=False) as ds:
@@ -1820,6 +2189,68 @@ class StellaratorSource(SourceBase):
                 np.asarray(eq.Z_lmn, dtype=float),
                 int(eq.NFP))
 
+    @staticmethod
+    def _desc_lambda_data(eq):
+        """Extract the lambda stream-function Fourier-Zernike modes/coefficients.
+
+        Mirrors :meth:`_desc_spectral_data` for the poloidal stream function
+        ``lambda`` (``L_lmn`` on ``L_basis``). Returns ``(l_modes, l_lmn)`` with
+        ``l_modes`` columns ``(l, m, n)``. Validated against DESC's own
+        ``compute('B')`` (see ``spf_validation/validate_desc_bhat.py``).
+        """
+        if isinstance(eq, (str, Path)):
+            with h5py.File(input_path(eq), 'r') as f:
+                g = f
+                if '_equilibria' in f:
+                    idx = sorted((k for k in f['_equilibria'] if k.isdigit()),
+                                 key=int)
+                    g = f['_equilibria'][idx[-1]]
+                return (np.asarray(g['_L_basis/_modes'][()], dtype=int),
+                        np.asarray(g['_L_lmn'][()], dtype=float))
+        return (np.asarray(eq.L_basis.modes, dtype=int),
+                np.asarray(eq.L_lmn, dtype=float))
+
+    @staticmethod
+    def _desc_iota(eq, rho):
+        """Rotational transform iota on the ``rho`` grid from a DESC equilibrium.
+
+        For a live equilibrium, iota is evaluated with DESC's own ``compute`` (so
+        current-constrained equilibria are handled correctly). For an HDF5 path,
+        the ``PowerSeriesProfile`` params are read and evaluated directly; if the
+        stored profile is not a power series (e.g. current-constrained with no
+        iota profile), a clear error is raised.
+        """
+        rho = np.asarray(rho, dtype=float)
+        if not isinstance(eq, (str, Path)):
+            from desc.grid import LinearGrid
+            lg = LinearGrid(rho=rho, M=0, N=0, NFP=int(eq.NFP))
+            vals = np.asarray(eq.compute('iota', grid=lg)['iota'])
+            rr = np.asarray(lg.nodes)[:, 0]
+            return np.array([vals[np.argmin(np.abs(rr - r))] for r in rho])
+        with h5py.File(input_path(eq), 'r') as f:
+            g = f
+            if '_equilibria' in f:
+                idx = sorted((k for k in f['_equilibria'] if k.isdigit()),
+                             key=int)
+                g = f['_equilibria'][idx[-1]]
+            iota_grp = g.get('_iota')
+            # A current-constrained equilibrium stores _iota as a scalar "None";
+            # its iota must be computed from the current profile, which requires
+            # a live desc Equilibrium. An iota-constrained equilibrium stores a
+            # PowerSeriesProfile group with _params and a power basis.
+            if (not isinstance(iota_grp, h5py.Group) or '_params' not in iota_grp
+                    or '_basis' not in iota_grp):
+                raise ValueError(
+                    "DESC HDF5 file has no stored iota profile (it is likely "
+                    "current-constrained); pass a live desc Equilibrium so iota "
+                    "can be computed, or supply an explicit iota= array.")
+            params = np.asarray(iota_grp['_params'][()], dtype=float)
+            # PowerSeriesProfile: iota(rho) = sum_k params[k] * rho**powers[k],
+            # where the radial powers are the first column of the basis modes
+            # (the basis may be even-only, so powers are not simply 0,1,2,...).
+            powers = np.asarray(iota_grp['_basis/_modes'][()], dtype=float)[:, 0]
+            return np.sum(params[None, :] * rho[:, None] ** powers[None, :], axis=1)
+
     @classmethod
     def from_desc(
         cls,
@@ -1870,29 +2301,45 @@ class StellaratorSource(SourceBase):
         cv.check_greater_than('n_rho', n_rho, 1)
         rho = np.linspace(0.0, 1.0, n_rho)
 
+        # DESC stores the stream function lambda and rotational transform in its
+        # own Fourier-Zernike / profile basis. When polarized emission is
+        # requested (and the field data is not supplied explicitly), lambda is
+        # folded into the same combined VMEC-style table as the geometry and iota
+        # is evaluated on the rho grid. The convention is validated against DESC's
+        # own compute('B') in spf_validation/validate_desc_bhat.py (sub-degree).
+        want_field = (kwargs.get('polarization') is not None and not all(
+            k in kwargs for k in ('field_rho', 'iota', 'lmns')))
+
         r_modes, r_lmn, z_modes, z_lmn, nfp = cls._desc_spectral_data(eq)
 
         # Collapse the Zernike radial dependence onto the rho grid, giving
         # product-form double Fourier coefficients for each surface, then
         # convert to combined form
+        def _collapse(modes, lmn):
+            return np.column_stack([
+                x * cls._zernike_radial(rho, l, m)
+                for (l, m, n), x in zip(modes, lmn)])
+        radial_r = _collapse(r_modes, r_lmn)
+        radial_z = _collapse(z_modes, z_lmn)
+        if want_field:
+            l_modes, l_lmn = cls._desc_lambda_data(eq)
+            radial_l = _collapse(l_modes, l_lmn)
+
         surface_tables = []
-        radial_r = np.column_stack([
-            x * cls._zernike_radial(rho, l, m)
-            for (l, m, n), x in zip(r_modes, r_lmn)])
-        radial_z = np.column_stack([
-            x * cls._zernike_radial(rho, l, m)
-            for (l, m, n), x in zip(z_modes, z_lmn)])
         for i in range(n_rho):
-            table_r, table_z = {}, {}
+            table_r, table_z, table_l = {}, {}, {}
             cls._desc_to_combined(r_modes[:, 1], r_modes[:, 2],
                                   radial_r[i], table_r)
             cls._desc_to_combined(z_modes[:, 1], z_modes[:, 2],
                                   radial_z[i], table_z)
-            surface_tables.append((table_r, table_z))
+            if want_field:
+                cls._desc_to_combined(l_modes[:, 1], l_modes[:, 2],
+                                      radial_l[i], table_l)
+            surface_tables.append((table_r, table_z, table_l))
 
-        # Union of modes across R, Z, and all surfaces
-        modes = sorted({key for table_r, table_z in surface_tables
-                        for key in (*table_r, *table_z)})
+        # Union of modes across R, Z, lambda (if present), and all surfaces
+        modes = sorted({key for tr, tz, tl in surface_tables
+                        for key in (*tr, *tz, *tl)})
         mode_m = np.array([m for m, _ in modes], dtype=int)
         mode_n = np.array([n for _, n in modes], dtype=int)
 
@@ -1901,14 +2348,18 @@ class StellaratorSource(SourceBase):
         rmns = np.zeros((n_rho, n_modes))
         zmnc = np.zeros((n_rho, n_modes))
         zmns = np.zeros((n_rho, n_modes))
-        for i, (table_r, table_z) in enumerate(surface_tables):
+        lmnc = np.zeros((n_rho, n_modes))
+        lmns = np.zeros((n_rho, n_modes))
+        for i, (table_r, table_z, table_l) in enumerate(surface_tables):
             for k, key in enumerate(modes):
                 if key in table_r:
                     rmnc[i, k], rmns[i, k] = table_r[key]
                 if key in table_z:
                     zmnc[i, k], zmns[i, k] = table_z[key]
+                if key in table_l:
+                    lmnc[i, k], lmns[i, k] = table_l[key]
 
-        # m to cm
+        # m to cm (lambda is dimensionless, not scaled)
         rmnc *= 100.0
         rmns *= 100.0
         zmnc *= 100.0
@@ -1916,6 +2367,15 @@ class StellaratorSource(SourceBase):
 
         # Drop the asymmetric tables for stellarator-symmetric equilibria
         sym = not (np.any(rmns) or np.any(zmnc))
+
+        field_kwargs = {}
+        if want_field:
+            field_kwargs = dict(
+                field_rho=rho,
+                iota=cls._desc_iota(eq, rho),
+                lmns=lmns,
+                lmnc=lmnc if np.any(lmnc) else None,
+            )
 
         return cls(
             rho=rho,
@@ -1929,6 +2389,7 @@ class StellaratorSource(SourceBase):
             zmnc=None if sym else zmnc,
             num_field_periods=nfp,
             energy=energy,
+            **field_kwargs,
             **kwargs
         )
 
@@ -1960,6 +2421,19 @@ class StellaratorSource(SourceBase):
             if coeff is not None:
                 ET.SubElement(element, name).text = \
                     ' '.join(str(c) for c in coeff.ravel())
+
+        if self.polarization is not None:
+            ET.SubElement(element, "polarization").text = \
+                ' '.join(str(x) for x in self.polarization)
+            ET.SubElement(element, "field_rho").text = \
+                ' '.join(str(x) for x in self.field_rho)
+            ET.SubElement(element, "iota").text = \
+                ' '.join(str(x) for x in self.iota)
+            ET.SubElement(element, "lmns").text = \
+                ' '.join(str(x) for x in self.lmns.ravel())
+            if self.lmnc is not None:
+                ET.SubElement(element, "lmnc").text = \
+                    ' '.join(str(x) for x in self.lmnc.ravel())
 
         # Energy distribution(s)
         for dist in self.energy:
@@ -2000,6 +2474,24 @@ class StellaratorSource(SourceBase):
             coeffs[name] = (np.array(text.split(), dtype=float).reshape(shape)
                             if text else None)
 
+        polarization_text = get_text(elem, 'polarization')
+        polarization = (tuple(float(x) for x in polarization_text.split())
+                        if polarization_text else None)
+        field_rho_text = get_text(elem, 'field_rho')
+        iota_text = get_text(elem, 'iota')
+        field_rho = (np.array(field_rho_text.split(), dtype=float)
+                     if field_rho_text else None)
+        iota = (np.array(iota_text.split(), dtype=float)
+                if iota_text else None)
+        field_shape = ((len(field_rho), len(mode_m))
+                       if field_rho is not None else None)
+        lmns_text = get_text(elem, 'lmns')
+        lmnc_text = get_text(elem, 'lmnc')
+        lmns = (np.array(lmns_text.split(), dtype=float).reshape(field_shape)
+                if lmns_text else None)
+        lmnc = (np.array(lmnc_text.split(), dtype=float).reshape(field_shape)
+                if lmnc_text else None)
+
         # Read energy distributions
         energy = [Univariate.from_xml_element(e) for e in elem.findall('energy')]
         if len(energy) == 1:
@@ -2027,7 +2519,12 @@ class StellaratorSource(SourceBase):
             energy=energy,
             time=time,
             strength=strength,
-            constraints=constraints
+            constraints=constraints,
+            polarization=polarization,
+            field_rho=field_rho,
+            iota=iota,
+            lmns=lmns,
+            lmnc=lmnc,
         )
 
 

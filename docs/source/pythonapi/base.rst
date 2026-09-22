@@ -39,6 +39,7 @@ Simulation Settings
    :template: myfunction.rst
 
    openmc.read_source_file
+   openmc.spin_fractions_to_abc
    openmc.write_source_file
 
 Material Specification

@@ -4,8 +4,8 @@
 #define HAS_DYNAMIC_LINKING
 #endif
 
-#include <algorithm> // for max
-#include <cmath>     // for sin, cos, abs
+#include <algorithm> // for max, clamp, upper_bound
+#include <cmath>     // for sin, cos, abs, acos, cbrt, sqrt
 #include <utility>   // for move
 
 #ifdef HAS_DYNAMIC_LINKING
@@ -56,6 +56,115 @@ void validate_particle_type(ParticleType type, const std::string& context)
   fatal_error(
     fmt::format("Unsupported source particle type '{}' (PDG {}) in {}.",
       type.str(), type.pdg_number(), context));
+}
+
+// Sample cos(theta) for the normalized sin^2(theta) angular shape. The
+// inverse CDF solves x^3 - 3x + (4u - 2) = 0; this is the root in [-1, 1].
+double sample_spf_costheta_perpendicular(double u)
+{
+  double x = 2.0 * std::cos(std::acos(1.0 - 2.0 * u) / 3.0 - 2.0 * PI / 3.0);
+  return std::clamp(x, -1.0, 1.0);
+}
+
+// Sample cos(theta) for the normalized 1/4 + 3/4 cos^2(theta) shape. The
+// inverse CDF solves x^3 + x + (2 - 4u) = 0 and has one real Cardano root.
+double sample_spf_costheta_parallel(double u)
+{
+  const double q = 2.0 - 4.0 * u;
+  const double discriminant = std::sqrt(q * q / 4.0 + 1.0 / 27.0);
+  double x =
+    std::cbrt(-q / 2.0 + discriminant) + std::cbrt(-q / 2.0 - discriminant);
+  return std::clamp(x, -1.0, 1.0);
+}
+
+// Read Schwartz Eq. 2 mode fractions and reduce them to the probability of
+// selecting the normalized perpendicular angular shape. Returning false
+// preserves the source's existing isotropic path when polarization is absent.
+bool read_spf_polarization(
+  pugi::xml_node node, const char* source_name, double& p_perpendicular)
+{
+  if (!check_for_node(node, "polarization"))
+    return false;
+
+  auto abc = get_node_array<double>(node, "polarization");
+  if (abc.size() != 3) {
+    fatal_error(fmt::format(
+      "{}: polarization must contain three mode fractions (a, b, c).",
+      source_name));
+  }
+
+  double a = abc[0];
+  double b = abc[1];
+  double c = abc[2];
+  if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c) || a < 0.0 ||
+      b < 0.0 || c < 0.0) {
+    fatal_error(
+      fmt::format("{}: polarization fractions must be finite and nonnegative.",
+        source_name));
+  }
+
+  const double total = a + b + c;
+  if (!(total > 0.0) || !std::isfinite(total)) {
+    fatal_error(
+      fmt::format("{}: polarization fractions must have a positive finite sum.",
+        source_name));
+  }
+  a /= total;
+  b /= total;
+  c /= total;
+
+  // Integrating Schwartz Eq. 2 over solid angle gives weights a for the
+  // perpendicular shape and (2/3)b + (1/3)c for the parallel shape.
+  const double eta = a + (2.0 / 3.0) * b + (1.0 / 3.0) * c;
+  p_perpendicular = a / eta;
+  if (!std::isfinite(p_perpendicular) || p_perpendicular < 0.0 ||
+      p_perpendicular > 1.0) {
+    fatal_error(fmt::format(
+      "{}: derived SPF mode probability is outside [0, 1].", source_name));
+  }
+  return true;
+}
+
+// Sample the verified SPF P2 mixture about an arbitrary local magnetic-field
+// direction and rotate it into the global Cartesian frame. This function has
+// no mutable state and is shared by all fusion source geometries.
+Direction sample_spf_direction(
+  double p_perpendicular, Direction bhat, uint64_t* seed)
+{
+  double cos_theta;
+  if (prn(seed) < p_perpendicular) {
+    cos_theta = sample_spf_costheta_perpendicular(prn(seed));
+  } else {
+    cos_theta = sample_spf_costheta_parallel(prn(seed));
+  }
+
+  const double azimuth = 2.0 * PI * prn(seed);
+  const double sin_theta =
+    std::sqrt(std::max(0.0, 1.0 - cos_theta * cos_theta));
+  const Direction local {
+    sin_theta * std::cos(azimuth), sin_theta * std::sin(azimuth), cos_theta};
+
+  const double bnorm = bhat.norm();
+  if (!(bnorm > 0.0) || !std::isfinite(bnorm)) {
+    fatal_error("Cannot sample a polarized source direction about a zero or "
+                "non-finite magnetic-field direction.");
+  }
+  Direction b = bhat / bnorm;
+
+  // Choose the Cartesian axis least aligned with b to avoid a degenerate
+  // Gram--Schmidt projection.
+  const double ax = std::abs(b.x);
+  const double ay = std::abs(b.y);
+  const double az = std::abs(b.z);
+  Direction reference = (ax <= ay && ax <= az) ? Direction {1.0, 0.0, 0.0}
+                        : (ay <= az)           ? Direction {0.0, 1.0, 0.0}
+                                               : Direction {0.0, 0.0, 1.0};
+  Direction ex = reference - b.dot(reference) * b;
+  ex /= ex.norm();
+  Direction ey = b.cross(ex);
+
+  Direction direction = local.x * ex + local.y * ey + local.z * b;
+  return direction / direction.norm();
 }
 
 } // namespace
@@ -832,6 +941,50 @@ TokamakSource::TokamakSource(pugi::xml_node node) : Source(node)
   // Initialize isotropic angular distribution
   angle_ = UPtrAngle {new Isotropic()};
 
+  // Optional spin-polarized emission. If polarization is absent, sample()
+  // retains the existing isotropic path and RNG draw order.
+  polarized_ = read_spf_polarization(node, "TokamakSource", p_perp_);
+  if (polarized_) {
+    std::string field_model = "toroidal";
+    if (check_for_node(node, "field_model")) {
+      field_model = get_node_value(node, "field_model");
+    }
+    if (field_model == "pitched") {
+      pitched_field_ = true;
+    } else if (field_model != "toroidal") {
+      fatal_error(
+        "TokamakSource: field_model must be 'toroidal' or 'pitched'.");
+    }
+
+    if (pitched_field_) {
+      q_r_over_a_ = get_node_array<double>(node, "q_r_over_a");
+      q_values_ = get_node_array<double>(node, "q_values");
+      if (q_r_over_a_.size() != q_values_.size() || q_r_over_a_.size() < 2) {
+        fatal_error("TokamakSource: pitched field_model requires q_r_over_a "
+                    "and q_values arrays of equal length >= 2.");
+      }
+      if (q_r_over_a_.front() != 0.0 || q_r_over_a_.back() != 1.0) {
+        fatal_error("TokamakSource: q_r_over_a must start at 0 and end at 1.");
+      }
+      for (size_t i = 0; i < q_r_over_a_.size(); ++i) {
+        if (!std::isfinite(q_r_over_a_[i]) || !std::isfinite(q_values_[i]) ||
+            !(q_values_[i] > 0.0)) {
+          fatal_error("TokamakSource: q_r_over_a must be finite and q_values "
+                      "must be finite and positive.");
+        }
+        if (i > 0 && q_r_over_a_[i] <= q_r_over_a_[i - 1]) {
+          fatal_error("TokamakSource: q_r_over_a must be strictly increasing.");
+        }
+      }
+      if (check_for_node(node, "field_sign")) {
+        field_sign_ = std::stod(get_node_value(node, "field_sign"));
+      }
+      if (field_sign_ != -1.0 && field_sign_ != 1.0) {
+        fatal_error("TokamakSource: field_sign must be +1 or -1.");
+      }
+    }
+  }
+
   precompute_sampling_distributions();
 }
 
@@ -1127,6 +1280,62 @@ Position TokamakSource::flux_to_cartesian(
   return {x, y, z};
 }
 
+double TokamakSource::interp_q(double r_norm) const
+{
+  if (r_norm <= q_r_over_a_.front())
+    return q_values_.front();
+  if (r_norm >= q_r_over_a_.back())
+    return q_values_.back();
+
+  auto upper = std::upper_bound(q_r_over_a_.begin(), q_r_over_a_.end(), r_norm);
+  size_t i = static_cast<size_t>(std::distance(q_r_over_a_.begin(), upper));
+  double fraction =
+    (r_norm - q_r_over_a_[i - 1]) / (q_r_over_a_[i] - q_r_over_a_[i - 1]);
+  return q_values_[i - 1] + fraction * (q_values_[i] - q_values_[i - 1]);
+}
+
+Direction TokamakSource::field_direction(
+  double r, double alpha, double phi) const
+{
+  const double sin_phi = std::sin(phi);
+  const double cos_phi = std::cos(phi);
+  if (!pitched_field_) {
+    // Pure toroidal field, phi-hat in Cartesian coordinates.
+    return {-sin_phi, cos_phi, 0.0};
+  }
+
+  // Unit tangent to the Miller poloidal curve at fixed r and phi.
+  const double psi = alpha + triangularity_ * std::sin(alpha);
+  const double R =
+    major_radius_ + r * std::cos(psi) +
+    shafranov_shift_ * (1.0 - r * r / (minor_radius_ * minor_radius_));
+  const double tangent_R =
+    -r * std::sin(psi) * (1.0 + triangularity_ * std::cos(alpha));
+  const double tangent_Z = elongation_ * r * std::cos(alpha);
+  const double tangent_norm =
+    std::sqrt(tangent_R * tangent_R + tangent_Z * tangent_Z);
+  if (!(tangent_norm > 0.0)) {
+    // The poloidal tangent degenerates on axis, where the pitch vanishes.
+    return {-sin_phi, cos_phi, 0.0};
+  }
+
+  const double poloidal_R = tangent_R / tangent_norm;
+  const double poloidal_Z = tangent_Z / tangent_norm;
+  const double q = interp_q(r / minor_radius_);
+  const double pitch = field_sign_ * r / (q * R);
+
+  // B is proportional to phi-hat + pitch*poloidal-hat.
+  const double Bx = -sin_phi + pitch * poloidal_R * cos_phi;
+  const double By = cos_phi + pitch * poloidal_R * sin_phi;
+  const double Bz = pitch * poloidal_Z;
+  const double Bnorm = std::sqrt(Bx * Bx + By * By + Bz * Bz);
+  if (!(Bnorm > 0.0) || !std::isfinite(Bnorm)) {
+    fatal_error("TokamakSource: calculated a zero or non-finite magnetic-field "
+                "direction.");
+  }
+  return {Bx / Bnorm, By / Bnorm, Bz / Bnorm};
+}
+
 SourceSite TokamakSource::sample(uint64_t* seed) const
 {
   SourceSite site;
@@ -1152,8 +1361,14 @@ SourceSite TokamakSource::sample(uint64_t* seed) const
     site.r.z += vertical_shift_;
   }
 
-  // 5. Sample isotropic direction
-  site.u = angle_->sample(seed).first;
+  // 5. Sample direction. The absent-polarization branch is the unchanged
+  // isotropic implementation, including its RNG draw order.
+  if (polarized_) {
+    site.u =
+      sample_spf_direction(p_perp_, field_direction(r, alpha, phi), seed);
+  } else {
+    site.u = angle_->sample(seed).first;
+  }
 
   // 6. Sample energy from distribution(s), applying the importance weight so
   // that biased distributions are handled correctly
@@ -1222,6 +1437,25 @@ StellaratorSource::StellaratorSource(pugi::xml_node node) : Source(node)
     asym_ = true;
   }
 
+  // Read optional spin-polarized angular model. VMEC stores lambda and iota
+  // on either a full or half radial mesh; field_rho makes that choice
+  // explicit and independent of the geometry mesh.
+  polarized_ = read_spf_polarization(node, "StellaratorSource", p_perp_);
+  if (polarized_) {
+    if (!check_for_node(node, "field_rho") || !check_for_node(node, "iota") ||
+        !check_for_node(node, "lmns")) {
+      fatal_error("StellaratorSource: polarized emission requires field_rho, "
+                  "iota, and lmns field data.");
+    }
+    field_rho_ = get_node_array<double>(node, "field_rho");
+    iota_ = get_node_array<double>(node, "iota");
+    lmns_ = get_node_array<double>(node, "lmns");
+    if (check_for_node(node, "lmnc")) {
+      lmnc_ = get_node_array<double>(node, "lmnc");
+      lambda_asym_ = true;
+    }
+  }
+
   // Read energy distribution(s)
   for (auto energy_node : node.children("energy")) {
     energy_dists_.push_back(distribution_from_xml(energy_node));
@@ -1288,6 +1522,41 @@ StellaratorSource::StellaratorSource(pugi::xml_node node) : Source(node)
       (rmns_.size() != n_rho * n_modes || zmnc_.size() != n_rho * n_modes)) {
     fatal_error("StellaratorSource: rmns and zmnc must have length "
                 "len(rho)*len(mode_m).");
+  }
+  if (polarized_) {
+    size_t n_field = field_rho_.size();
+    if (n_field < 2 || iota_.size() != n_field) {
+      fatal_error("StellaratorSource: field_rho and iota must have equal "
+                  "length of at least 2.");
+    }
+    if (field_rho_.front() < 0.0 || field_rho_.back() > 1.0) {
+      fatal_error("StellaratorSource: field_rho values must lie in [0, 1].");
+    }
+    for (size_t i = 0; i < n_field; ++i) {
+      if (!std::isfinite(field_rho_[i]) || !std::isfinite(iota_[i])) {
+        fatal_error(
+          "StellaratorSource: field_rho and iota must contain finite values.");
+      }
+      if (i > 0 && field_rho_[i] <= field_rho_[i - 1]) {
+        fatal_error(
+          "StellaratorSource: field_rho must be strictly increasing.");
+      }
+    }
+    if (lmns_.size() != n_field * n_modes ||
+        (lambda_asym_ && lmnc_.size() != n_field * n_modes)) {
+      fatal_error("StellaratorSource: lambda coefficient tables must have "
+                  "length len(field_rho)*len(mode_m).");
+    }
+    for (double coefficient : lmns_) {
+      if (!std::isfinite(coefficient)) {
+        fatal_error("StellaratorSource: lmns must contain only finite values.");
+      }
+    }
+    for (double coefficient : lmnc_) {
+      if (!std::isfinite(coefficient)) {
+        fatal_error("StellaratorSource: lmnc must contain only finite values.");
+      }
+    }
   }
   if (energy_dists_.empty()) {
     fatal_error(
@@ -1559,6 +1828,105 @@ double StellaratorSource::eval_density(int bin, double t, double theta,
   return jacobian_sign_ * R * (Rr * Zt - Rt * Zr);
 }
 
+Direction StellaratorSource::field_direction(
+  int bin, double t, double rho, double theta, double zeta) const
+{
+  // VMEC's straight-field-line angle is theta* = theta + lambda. Therefore
+  // the contravariant components are proportional to
+  //   B^theta = iota - d(lambda)/d(zeta)
+  //   B^zeta  = 1 + d(lambda)/d(theta).
+  // The common flux/Jacobian factor is unnecessary for a unit direction.
+  size_t field_bin;
+  double field_t;
+  if (rho <= field_rho_.front()) {
+    field_bin = 0;
+    field_t = 0.0;
+  } else if (rho >= field_rho_.back()) {
+    field_bin = field_rho_.size() - 2;
+    field_t = 1.0;
+  } else {
+    auto upper = std::upper_bound(field_rho_.begin(), field_rho_.end(), rho);
+    field_bin =
+      static_cast<size_t>(std::distance(field_rho_.begin(), upper) - 1);
+    field_t = (rho - field_rho_[field_bin]) /
+              (field_rho_[field_bin + 1] - field_rho_[field_bin]);
+  }
+
+  const size_t n_modes = mode_m_.size();
+  const double* rc0 = &rmnc_[bin * n_modes];
+  const double* rc1 = &rmnc_[(bin + 1) * n_modes];
+  const double* zs0 = &zmns_[bin * n_modes];
+  const double* zs1 = &zmns_[(bin + 1) * n_modes];
+  const double* rs0 = asym_ ? &rmns_[bin * n_modes] : nullptr;
+  const double* rs1 = asym_ ? &rmns_[(bin + 1) * n_modes] : nullptr;
+  const double* zc0 = asym_ ? &zmnc_[bin * n_modes] : nullptr;
+  const double* zc1 = asym_ ? &zmnc_[(bin + 1) * n_modes] : nullptr;
+  const double* ls0 = &lmns_[field_bin * n_modes];
+  const double* ls1 = &lmns_[(field_bin + 1) * n_modes];
+  const double* lc0 = lambda_asym_ ? &lmnc_[field_bin * n_modes] : nullptr;
+  const double* lc1 =
+    lambda_asym_ ? &lmnc_[(field_bin + 1) * n_modes] : nullptr;
+
+  double R = 0.0;
+  double R_theta = 0.0, R_zeta = 0.0;
+  double Z_theta = 0.0, Z_zeta = 0.0;
+  double lambda_theta = 0.0, lambda_zeta = 0.0;
+  for (size_t k = 0; k < n_modes; ++k) {
+    const double m = mode_m_[k];
+    const double n = mode_n_[k] * num_field_periods_;
+    const double angle = m * theta - n * zeta;
+    const double c = std::cos(angle);
+    const double s = std::sin(angle);
+
+    const double rc = rc0[k] + t * (rc1[k] - rc0[k]);
+    const double zs = zs0[k] + t * (zs1[k] - zs0[k]);
+    R += rc * c;
+    R_theta -= m * rc * s;
+    R_zeta += n * rc * s;
+    Z_theta += m * zs * c;
+    Z_zeta -= n * zs * c;
+    if (asym_) {
+      const double rs = rs0[k] + t * (rs1[k] - rs0[k]);
+      const double zc = zc0[k] + t * (zc1[k] - zc0[k]);
+      R += rs * s;
+      R_theta += m * rs * c;
+      R_zeta -= n * rs * c;
+      Z_theta -= m * zc * s;
+      Z_zeta += n * zc * s;
+    }
+
+    const double ls = ls0[k] + field_t * (ls1[k] - ls0[k]);
+    lambda_theta += m * ls * c;
+    lambda_zeta -= n * ls * c;
+    if (lambda_asym_) {
+      const double lc = lc0[k] + field_t * (lc1[k] - lc0[k]);
+      lambda_theta -= m * lc * s;
+      lambda_zeta += n * lc * s;
+    }
+  }
+
+  const double iota =
+    iota_[field_bin] + field_t * (iota_[field_bin + 1] - iota_[field_bin]);
+  const double B_theta = iota - lambda_zeta;
+  const double B_zeta = 1.0 + lambda_theta;
+
+  // Convert B^theta e_theta + B^zeta e_zeta to Cartesian coordinates. The
+  // cylindrical basis rotation contributes R*phi_hat to e_zeta.
+  const double cos_zeta = std::cos(zeta);
+  const double sin_zeta = std::sin(zeta);
+  const double Br = B_theta * R_theta + B_zeta * R_zeta;
+  const double Bphi = B_zeta * R;
+  const double Bz = B_theta * Z_theta + B_zeta * Z_zeta;
+  Direction B {
+    Br * cos_zeta - Bphi * sin_zeta, Br * sin_zeta + Bphi * cos_zeta, Bz};
+  const double norm = B.norm();
+  if (!(norm > 0.0) || !std::isfinite(norm)) {
+    fatal_error("StellaratorSource: calculated a zero or non-finite "
+                "magnetic-field direction.");
+  }
+  return B / norm;
+}
+
 std::pair<double, double> StellaratorSource::sample_energy(
   double rho, uint64_t* seed) const
 {
@@ -1593,10 +1961,10 @@ SourceSite StellaratorSource::sample(uint64_t* seed) const
 
   // 2. Rejection-sample (theta, zeta) from p(theta, zeta | rho) ~ R*tau
   double env = envelope_[bin];
-  double R, Z, zeta;
+  double R, Z, theta, zeta;
   int64_t n_reject = 0;
   while (true) {
-    double theta = 2.0 * PI * prn(seed);
+    theta = 2.0 * PI * prn(seed);
     zeta = 2.0 * PI * prn(seed);
     double f = eval_density(bin, t, theta, zeta, &R, &Z);
     if (prn(seed) * env < f)
@@ -1610,8 +1978,14 @@ SourceSite StellaratorSource::sample(uint64_t* seed) const
   // 3. Convert to Cartesian coordinates (zeta is the cylindrical angle)
   site.r = {R * std::cos(zeta), R * std::sin(zeta), Z};
 
-  // 4. Sample isotropic direction
-  site.u = angle_->sample(seed).first;
+  // 4. Sample direction. With no polarization input, retain the original
+  // isotropic branch and its random-number draw order.
+  if (polarized_) {
+    site.u = sample_spf_direction(
+      p_perp_, field_direction(bin, t, rho, theta, zeta), seed);
+  } else {
+    site.u = angle_->sample(seed).first;
+  }
 
   // 5. Sample energy from distribution(s), applying the importance weight
   auto [E, E_wgt] = sample_energy(rho, seed);
