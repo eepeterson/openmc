@@ -1911,6 +1911,11 @@ class StellaratorSource(SourceBase):
         zmnc *= 100.0
         zmns *= 100.0
 
+        # Drop modes whose R and Z coefficients are exactly zero on every surface.
+        keep = np.any((rmnc != 0) | (rmns != 0) | (zmnc != 0) | (zmns != 0), axis=0)
+        mode_m, mode_n = mode_m[keep], mode_n[keep]
+        rmnc, rmns, zmnc, zmns = (a[:, keep] for a in (rmnc, rmns, zmnc, zmns))
+
         # Drop the asymmetric tables for stellarator-symmetric equilibria
         sym = not (np.any(rmns) or np.any(zmnc))
 
