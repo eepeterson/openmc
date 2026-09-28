@@ -37,6 +37,7 @@
 #include "openmc/settings.h"
 #include "openmc/simulation.h"
 #include "openmc/state_point.h"
+#include "openmc/stellarator.h"
 #include "openmc/string_utils.h"
 #include "openmc/surface.h"
 #include "openmc/xml_interface.h"
@@ -1471,40 +1472,57 @@ void StellaratorSource::precompute_sampling_distributions()
       "coefficient tables are inconsistent.");
   }
 
-  // Build the marginal radial PDF p(rho) ~ S(rho) * V'(rho) on a refined grid
-  // containing all surfaces and bin midpoints. At interior surfaces the
-  // one-sided values from the two adjacent bins are averaged (the piecewise-
-  // linear coefficient interpolation makes V' one-sided there).
-  vector<double> grid(2 * n_rho - 1), pdf(2 * n_rho - 1);
-  for (size_t i = 0; i < n_rho; ++i) {
-    grid[2 * i] = rho_[i];
-    double vp;
-    if (i == 0) {
-      vp = vp_lo[0];
-    } else if (i == n_rho - 1) {
-      vp = vp_hi[n_bins - 1];
-    } else {
-      vp = 0.5 * (vp_hi[i - 1] + vp_lo[i]);
-    }
-    pdf[2 * i] = emission_density_[i] * std::max(0.0, vp);
-  }
-  for (size_t b = 0; b < n_bins; ++b) {
-    grid[2 * b + 1] = 0.5 * (rho_[b] + rho_[b + 1]);
-    double s_mid = 0.5 * (emission_density_[b] + emission_density_[b + 1]);
-    pdf[2 * b + 1] = s_mid * std::max(0.0, vp_mid[b]);
-  }
-
-  double total = 0.0;
-  for (size_t i = 1; i < grid.size(); ++i) {
-    total += 0.5 * (pdf[i - 1] + pdf[i]) * (grid[i] - grid[i - 1]);
-  }
-  if (total <= 0.0) {
+  // Integrate S(rho)*V'(rho) independently on each radial interval.
+  double s_scale =
+    *std::max_element(emission_density_.begin(), emission_density_.end());
+  if (!(s_scale > 0))
     fatal_error(
-      "StellaratorSource: Integrated emission density is zero or negative. "
-      "Check emission_density profile.");
+      "StellaratorSource: integrated emission density must be positive.");
+  vector<long double> masses(n_bins);
+  radial_pdf_.resize(n_bins);
+  radial_cdf_.assign(n_bins + 1, 0);
+  for (size_t b = 0; b < n_bins; ++b) {
+    double h = rho_[b + 1] - rho_[b];
+    double v0 = vp_lo[b];
+    double vh = vp_mid[b];
+    double v1 = vp_hi[b];
+    array<double, 3> a {v0, 4 * vh - 3 * v0 - v1, 2 * (v0 + v1 - 2 * vh)};
+    double minimum = std::min(v0, v1);
+    if (a[2] > 0) {
+      double t = -a[1] / (2 * a[2]);
+      if (t > 0 && t < 1)
+        minimum = std::min(minimum, a[0] + t * (a[1] + t * a[2]));
+    }
+    if (!std::isfinite(v0 + vh + v1) || minimum < 0)
+      fatal_error("StellaratorSource: invalid differential volume polynomial.");
+    double s0 = emission_density_[b] / s_scale;
+    double ds = emission_density_[b + 1] / s_scale - s0;
+    auto& c = radial_pdf_[b];
+    c = {s0 * a[0], s0 * a[1] + ds * a[0], s0 * a[2] + ds * a[1], ds * a[2]};
+    double scale = 0;
+    for (double v : c)
+      scale = std::max(scale, std::abs(v));
+    if (scale > 0) {
+      for (double& v : c)
+        v /= scale;
+      masses[b] =
+        static_cast<long double>(h) * scale * stellarator_integral(c, 1);
+      if (!std::isfinite(masses[b]) || masses[b] <= 0)
+        fatal_error("StellaratorSource: invalid radial interval mass.");
+    }
   }
-  radial_dist_ = make_unique<Tabular>(
-    grid.data(), pdf.data(), grid.size(), Interpolation::lin_lin);
+  long double total = 0;
+  for (auto mass : masses)
+    total += mass;
+  if (!(total > 0) || !std::isfinite(total))
+    fatal_error(
+      "StellaratorSource: integrated emission must be finite and positive.");
+  long double cumulative = 0;
+  for (size_t b = 0; b < n_bins; ++b) {
+    cumulative += masses[b];
+    radial_cdf_[b + 1] = cumulative / total;
+  }
+  radial_cdf_.back() = 1;
 }
 
 double StellaratorSource::eval_density(int bin, double t, double theta,
@@ -1585,11 +1603,13 @@ SourceSite StellaratorSource::sample(uint64_t* seed) const
   site.delayed_group = 0;
 
   // 1. Sample rho from the marginal radial CDF
-  double rho = radial_dist_->sample(seed).first;
-  int n_bins = static_cast<int>(rho_.size()) - 1;
-  int bin = static_cast<int>(lower_bound_index(rho_.begin(), rho_.end(), rho));
-  bin = std::min(std::max(bin, 0), n_bins - 1);
-  double t = (rho - rho_[bin]) / (rho_[bin + 1] - rho_[bin]);
+  double u = prn(seed);
+  int bin = std::upper_bound(radial_cdf_.begin(), radial_cdf_.end(), u) -
+            radial_cdf_.begin() - 1;
+  double local =
+    (u - radial_cdf_[bin]) / (radial_cdf_[bin + 1] - radial_cdf_[bin]);
+  double t = stellarator_invert(radial_pdf_[bin], local);
+  double rho = rho_[bin] + t * (rho_[bin + 1] - rho_[bin]);
 
   // 2. Rejection-sample (theta, zeta) from p(theta, zeta | rho) ~ R*tau
   double env = envelope_[bin];

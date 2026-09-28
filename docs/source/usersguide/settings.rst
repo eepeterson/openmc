@@ -352,8 +352,10 @@ angle, and :math:`\zeta` is the toroidal angle (identical to the cylindrical
 azimuthal angle in both codes). The user provides the Fourier coefficients of
 :math:`R(\rho,\theta,\zeta)` and :math:`Z(\rho,\theta,\zeta)` on a radial grid
 together with an emission density :math:`S(\rho)` that is constant on flux
-surfaces. The radial coordinate is sampled by inverting a tabulated CDF of the
-exact marginal distribution :math:`S(\rho)\, V'(\rho)` and the two angles are
+surfaces. Fourier coefficients and emission are interpolated linearly in
+:math:`\rho`. The cubic marginal density :math:`S(\rho)\, V'(\rho)` is integrated
+analytically within each interval and its quartic CDF is inverted numerically.
+The two angles are
 sampled from the conditional distribution
 :math:`p(\theta,\zeta|\rho) \propto R\,|\tau|` (with :math:`\tau` the
 poloidal-plane Jacobian) by rejection.
