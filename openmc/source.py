@@ -10,6 +10,7 @@ import lxml.etree as ET
 import numpy as np
 import h5py
 import pandas as pd
+from scipy.special import eval_jacobi
 
 import openmc
 import openmc.checkvalue as cv
@@ -1780,17 +1781,13 @@ class StellaratorSource(SourceBase):
                 add(am, -an, -h, 0.0)
 
     @staticmethod
-    def _zernike_radial(rho, l, m):
+    def _zernike_radial(rho, l, m):  # noqa: E741
         """Unnormalized Zernike radial polynomial :math:`R_l^{|m|}(\\rho)`."""
-        from math import factorial
         m = abs(m)
-        out = np.zeros_like(rho, dtype=float)
-        for k in range((l - m) // 2 + 1):
-            c = ((-1)**k * factorial(l - k)
-                 / (factorial(k) * factorial((l + m) // 2 - k)
-                    * factorial((l - m) // 2 - k)))
-            out += c * rho**(l - 2*k)
-        return out
+        if l < m or (l - m) % 2:
+            raise ValueError("Zernike l - abs(m) must be nonnegative and even")
+        rho = np.asarray(rho, dtype=float)
+        return rho**m * eval_jacobi((l - m)//2, 0, m, 2*rho**2 - 1)
 
     @staticmethod
     def _desc_spectral_data(eq):
@@ -1878,10 +1875,10 @@ class StellaratorSource(SourceBase):
         surface_tables = []
         radial_r = np.column_stack([
             x * cls._zernike_radial(rho, l, m)
-            for (l, m, n), x in zip(r_modes, r_lmn)])
+            for (l, m, n), x in zip(r_modes, r_lmn)])  # noqa: E741
         radial_z = np.column_stack([
             x * cls._zernike_radial(rho, l, m)
-            for (l, m, n), x in zip(z_modes, z_lmn)])
+            for (l, m, n), x in zip(z_modes, z_lmn)])  # noqa: E741
         for i in range(n_rho):
             table_r, table_z = {}, {}
             cls._desc_to_combined(r_modes[:, 1], r_modes[:, 2],
