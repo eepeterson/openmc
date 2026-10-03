@@ -1478,7 +1478,7 @@ void StellaratorSource::precompute_sampling_distributions()
   if (!(s_scale > 0))
     fatal_error(
       "StellaratorSource: integrated emission density must be positive.");
-  vector<long double> masses(n_bins);
+  vector<double> masses(n_bins);
   radial_pdf_.resize(n_bins);
   radial_cdf_.assign(n_bins + 1, 0);
   for (size_t b = 0; b < n_bins; ++b) {
@@ -1505,19 +1505,18 @@ void StellaratorSource::precompute_sampling_distributions()
     if (scale > 0) {
       for (double& v : c)
         v /= scale;
-      masses[b] =
-        static_cast<long double>(h) * scale * stellarator_integral(c, 1);
+      masses[b] = h * scale * stellarator_integral(c, 1);
       if (!std::isfinite(masses[b]) || masses[b] <= 0)
         fatal_error("StellaratorSource: invalid radial interval mass.");
     }
   }
-  long double total = 0;
+  double total = 0;
   for (auto mass : masses)
     total += mass;
   if (!(total > 0) || !std::isfinite(total))
     fatal_error(
       "StellaratorSource: integrated emission must be finite and positive.");
-  long double cumulative = 0;
+  double cumulative = 0;
   for (size_t b = 0; b < n_bins; ++b) {
     cumulative += masses[b];
     radial_cdf_[b + 1] = cumulative / total;
