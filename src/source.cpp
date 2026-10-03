@@ -6,6 +6,7 @@
 
 #include <algorithm> // for max
 #include <cmath>     // for sin, cos, abs
+#include <limits>    // for numeric_limits
 #include <utility>   // for move
 
 #ifdef HAS_DYNAMIC_LINKING
@@ -37,7 +38,6 @@
 #include "openmc/settings.h"
 #include "openmc/simulation.h"
 #include "openmc/state_point.h"
-#include "openmc/stellarator.h"
 #include "openmc/string_utils.h"
 #include "openmc/surface.h"
 #include "openmc/xml_interface.h"
@@ -1193,6 +1193,25 @@ double quad_max01(double f0, double fh, double f1)
   return m;
 }
 
+// Integral of a cubic density on [0, 1], excluding the radial bin width.
+double cubic_integral01(const array<double, 4>& c)
+{
+  return c[0] + (c[1] / 2 + (c[2] / 3 + c[3] / 4));
+}
+
+// Bernstein basis functions are nonnegative and sum to one on [0,1], so the
+// largest Bernstein coefficient bounds the cubic for rejection sampling.
+double cubic_rejection_bound(const array<double, 4>& c)
+{
+  double bound = std::max({c[0], c[0] + c[1] / 3,
+    c[0] + 2 * c[1] / 3 + c[2] / 3, c[0] + c[1] + c[2] + c[3]});
+  // Allow for rounding in both the bound and the polynomial evaluation.
+  double magnitude = 0;
+  for (double value : c)
+    magnitude += std::abs(value);
+  return bound + 64 * std::numeric_limits<double>::epsilon() * magnitude;
+}
+
 } // namespace
 
 StellaratorSource::StellaratorSource(pugi::xml_node node) : Source(node)
@@ -1505,7 +1524,7 @@ void StellaratorSource::precompute_sampling_distributions()
     if (scale > 0) {
       for (double& v : c)
         v /= scale;
-      masses[b] = h * scale * stellarator_integral(c, 1);
+      masses[b] = h * scale * cubic_integral01(c);
       if (!std::isfinite(masses[b]) || masses[b] <= 0)
         fatal_error("StellaratorSource: invalid radial interval mass.");
     }
@@ -1607,7 +1626,7 @@ SourceSite StellaratorSource::sample(uint64_t* seed) const
             radial_cdf_.begin() - 1;
   double t = (u - radial_cdf_[bin]) / (radial_cdf_[bin + 1] - radial_cdf_[bin]);
   const auto& c = radial_pdf_[bin];
-  double bound = stellarator_rejection_bound(c);
+  double bound = cubic_rejection_bound(c);
   int64_t n_reject = 0;
   while (true) {
     double pdf = c[0] + t * (c[1] + t * (c[2] + t * c[3]));
