@@ -6,6 +6,7 @@
 
 #include <algorithm> // for max
 #include <cmath>     // for sin, cos, abs
+#include <numeric>   // for accumulate
 #include <utility>   // for move
 
 #ifdef HAS_DYNAMIC_LINKING
@@ -1525,9 +1526,7 @@ void StellaratorSource::precompute_sampling_distributions()
         fatal_error("StellaratorSource: invalid radial interval mass.");
     }
   }
-  double total = 0;
-  for (auto mass : masses)
-    total += mass;
+  double total = std::accumulate(masses.begin(), masses.end(), 0.0);
   if (!(total > 0) || !std::isfinite(total))
     fatal_error(
       "StellaratorSource: integrated emission must be finite and positive.");
