@@ -1364,8 +1364,8 @@ class StellaratorSource(SourceBase):
     :math:`p(\rho) \propto S(\rho) V'(\rho)` (with
     :math:`V'(\rho) = \oint\oint R|\tau| \,d\theta\, d\zeta` the differential
     volume for the interpolated geometry) by integrating a cubic PDF in each
-    radial interval and numerically inverting its quartic CDF, and the
-    two angles are then sampled from the conditional
+    radial interval and using rejection sampling within the selected interval.
+    The two angles are then sampled from the conditional
     :math:`p(\theta,\zeta|\rho) \propto R|\tau|` by rejection against a
     precomputed per-radial-bin majorant.
 

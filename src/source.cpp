@@ -1601,19 +1601,31 @@ SourceSite StellaratorSource::sample(uint64_t* seed) const
   site.wgt = 1.0;
   site.delayed_group = 0;
 
-  // 1. Sample rho from the marginal radial CDF
+  // 1. Select a radial bin by its integrated mass, then sample within that bin.
   double u = prn(seed);
   int bin = std::upper_bound(radial_cdf_.begin(), radial_cdf_.end(), u) -
             radial_cdf_.begin() - 1;
-  double local =
-    (u - radial_cdf_[bin]) / (radial_cdf_[bin + 1] - radial_cdf_[bin]);
-  double t = stellarator_invert(radial_pdf_[bin], local);
+  double t = (u - radial_cdf_[bin]) / (radial_cdf_[bin + 1] - radial_cdf_[bin]);
+  const auto& c = radial_pdf_[bin];
+  double bound = stellarator_rejection_bound(c);
+  int64_t n_reject = 0;
+  while (true) {
+    double pdf = c[0] + t * (c[1] + t * (c[2] + t * c[3]));
+    if (prn(seed) * bound < pdf)
+      break;
+    if (++n_reject > MAX_SOURCE_REJECTIONS_PER_SAMPLE) {
+      fatal_error("StellaratorSource: exceeded the maximum number of "
+                  "rejections while sampling within a radial interval.");
+    }
+    // Retain the selected bin so rejection does not change its probability.
+    t = prn(seed);
+  }
   double rho = rho_[bin] + t * (rho_[bin + 1] - rho_[bin]);
 
   // 2. Rejection-sample (theta, zeta) from p(theta, zeta | rho) ~ R*tau
   double env = envelope_[bin];
   double R, Z, zeta;
-  int64_t n_reject = 0;
+  n_reject = 0;
   while (true) {
     double theta = 2.0 * PI * prn(seed);
     zeta = 2.0 * PI * prn(seed);

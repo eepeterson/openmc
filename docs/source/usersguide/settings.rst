@@ -354,8 +354,9 @@ azimuthal angle in both codes). The user provides the Fourier coefficients of
 together with an emission density :math:`S(\rho)` that is constant on flux
 surfaces. Fourier coefficients and emission are interpolated linearly in
 :math:`\rho`. The cubic marginal density :math:`S(\rho)\, V'(\rho)` is integrated
-analytically within each interval and its quartic CDF is inverted numerically.
-The two angles are
+analytically to select an interval, then sampled within that interval by
+rejection against a bound derived from its Bernstein coefficients. Rejected
+radial proposals are resampled within the same interval. The two angles are
 sampled from the conditional distribution
 :math:`p(\theta,\zeta|\rho) \propto R\,|\tau|` (with :math:`\tau` the
 poloidal-plane Jacobian) by rejection.

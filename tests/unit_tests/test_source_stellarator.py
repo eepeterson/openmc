@@ -344,7 +344,8 @@ def test_stellarator_source_from_desc(run_in_tmpdir):
     np.testing.assert_allclose(src.zmns[:, k00], 0.0, atol=1e-12)
 
 
-@pytest.mark.parametrize('case', ['emission', 'geometry', 'zero_intervals'])
+@pytest.mark.parametrize('case', [
+    'emission', 'decreasing_emission', 'geometry', 'zero_intervals'])
 def test_stellarator_radial_cdf(case, run_in_tmpdir):
     from scipy.stats import kstest
 
@@ -352,6 +353,12 @@ def test_stellarator_radial_cdf(case, run_in_tmpdir):
         rho, q, emission = np.array([0., 1.]), np.array([0., 1.]), [0., 1.]
         def cdf(x):
             return np.clip(x, 0, 1)**3
+    elif case == 'decreasing_emission':
+        # The PDF vanishes at both endpoints and peaks inside the interval.
+        rho, q, emission = np.array([0., 1.]), np.array([0., 1.]), [1., 0.]
+        def cdf(x):
+            x = np.clip(x, 0, 1)
+            return 3*x**2 - 2*x**3
     elif case == 'geometry':
         rho, q, emission = np.array([0., .5, 1.]), np.array([0., .1, 1.]), [1.] * 3
         def cdf(x):

@@ -1,24 +1,25 @@
-#include "openmc/constants.h"
 #include "openmc/stellarator.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
 
-TEST_CASE("Stellarator cubic CDF inversion", "[stellarator]")
+TEST_CASE("Stellarator cubic integration and rejection bounds", "[stellarator]")
 {
   for (int degree = 0; degree < 4; ++degree) {
     openmc::array<double, 4> c {};
     c[degree] = 1;
-    for (double u :
-      {0.0, 1.e-30, 1.e-12, 0.01, 0.5, 0.99, std::nextafter(1.0, 0.0), 1.0}) {
-      double t = openmc::stellarator_invert(c, u);
-      REQUIRE(std::abs(t - std::pow(u, 1.0 / (degree + 1))) < 4.e-15);
-    }
+    REQUIRE(openmc::stellarator_integral(c, 1) == 1.0 / (degree + 1));
+    REQUIRE(openmc::stellarator_rejection_bound(c) >= 1);
   }
   // PDF vanishes at both endpoints, and has a negative monomial coefficient.
   openmc::array<double, 4> c {0, 1, -1, 0};
-  for (double t : {0.0, 0.001, 0.2, 0.5, 0.99, 1.0}) {
-    double u = 3 * t * t - 2 * t * t * t;
-    REQUIRE(std::abs(openmc::stellarator_invert(c, u) - t) < 1.e-13);
-  }
+  REQUIRE(std::abs(openmc::stellarator_integral(c, 1) - 1.0 / 6) < 1.e-15);
+  REQUIRE(openmc::stellarator_rejection_bound(c) >= 0.25);
+  // t*(1-t)^2 has its maximum at t=1/3, despite zero endpoint values.
+  c = {0, 1, -2, 1};
+  REQUIRE(std::abs(openmc::stellarator_integral(c, 1) - 1.0 / 12) < 1.e-15);
+  REQUIRE(openmc::stellarator_rejection_bound(c) >= 4.0 / 27);
+  // A cubic may have negative Bernstein coefficients and still be nonnegative.
+  c = {1, -4, 4, 0};
+  REQUIRE(openmc::stellarator_rejection_bound(c) >= 1);
 }

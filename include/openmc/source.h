@@ -428,8 +428,8 @@ private:
 //! The sampling algorithm:
 //! 1. Sample rho from the marginal p(rho) ~ S(rho) * V'(rho), where
 //!    V'(rho) = int R |tau| dtheta dzeta is the differential volume, evaluated
-//!    by Fourier quadrature. Each radial bin has a cubic PDF whose integral
-//!    is evaluated analytically and inverted with safeguarded Newton iteration.
+//!    by Fourier quadrature. Each radial bin is selected using its analytically
+//!    integrated cubic PDF, then rho is sampled within the bin by rejection.
 //! 2. Sample (theta, zeta) from the conditional p(theta, zeta | rho)
 //!    ~ R |tau| by rejection against a precomputed per-radial-bin majorant.
 //! 3. Sample energy and time from user-provided distribution(s).
