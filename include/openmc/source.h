@@ -504,9 +504,9 @@ private:
   // Angular distribution (isotropic)
   UPtrAngle angle_;
 
-  // Cubic radial PDFs in local bin coordinates and normalized bin masses.
+  // Bound-normalized cubic radial PDFs and the distribution of bin masses.
   vector<array<double, 4>> radial_pdf_;
-  vector<double> radial_cdf_;
+  DiscreteIndex radial_bins_;
 
   // Per-radial-bin majorant of R*tau for rejection sampling (n_rho - 1)
   vector<double> envelope_;

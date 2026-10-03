@@ -1193,12 +1193,6 @@ double quad_max01(double f0, double fh, double f1)
   return m;
 }
 
-// Integral of a cubic density on [0, 1], excluding the radial bin width.
-double cubic_integral01(const array<double, 4>& c)
-{
-  return c[0] + (c[1] / 2 + (c[2] / 3 + c[3] / 4));
-}
-
 // Bernstein basis functions are nonnegative and sum to one on [0,1], so the
 // largest Bernstein coefficient bounds the cubic for rejection sampling.
 double cubic_rejection_bound(const array<double, 4>& c)
@@ -1496,7 +1490,6 @@ void StellaratorSource::precompute_sampling_distributions()
       "StellaratorSource: integrated emission density must be positive.");
   vector<double> masses(n_bins);
   radial_pdf_.resize(n_bins);
-  radial_cdf_.assign(n_bins + 1, 0);
   for (size_t b = 0; b < n_bins; ++b) {
     double h = rho_[b + 1] - rho_[b];
     double v0 = vp_lo[b];
@@ -1512,30 +1505,25 @@ void StellaratorSource::precompute_sampling_distributions()
     if (!std::isfinite(v0 + vh + v1) || minimum < 0)
       fatal_error("StellaratorSource: invalid differential volume polynomial.");
     double s0 = emission_density_[b] / s_scale;
-    double ds = emission_density_[b + 1] / s_scale - s0;
+    double s1 = emission_density_[b + 1] / s_scale;
+    double ds = s1 - s0;
+    // Simpson's rule exactly integrates the cubic S(rho)*V'(rho).
+    masses[b] = h * ((s0 / 6) * v0 + ((s0 + s1) / 3) * vh + (s1 / 6) * v1);
     auto& c = radial_pdf_[b];
     c = {s0 * a[0], s0 * a[1] + ds * a[0], s0 * a[2] + ds * a[1], ds * a[2]};
-    double scale = 0;
-    for (double v : c)
-      scale = std::max(scale, std::abs(v));
-    if (scale > 0) {
-      for (double& v : c)
-        v /= scale;
-      masses[b] = h * scale * cubic_integral01(c);
-      if (!std::isfinite(masses[b]) || masses[b] <= 0)
+    double bound = cubic_rejection_bound(c);
+    if (bound > 0) {
+      if (!std::isfinite(bound) || !std::isfinite(masses[b]) || masses[b] <= 0)
         fatal_error("StellaratorSource: invalid radial interval mass.");
+      for (double& v : c)
+        v /= bound;
     }
   }
   double total = std::accumulate(masses.begin(), masses.end(), 0.0);
   if (!(total > 0) || !std::isfinite(total))
     fatal_error(
       "StellaratorSource: integrated emission must be finite and positive.");
-  double cumulative = 0;
-  for (size_t b = 0; b < n_bins; ++b) {
-    cumulative += masses[b];
-    radial_cdf_[b + 1] = cumulative / total;
-  }
-  radial_cdf_.back() = 1;
+  radial_bins_.assign({masses.data(), masses.size()});
 }
 
 double StellaratorSource::eval_density(int bin, double t, double theta,
@@ -1616,16 +1604,13 @@ SourceSite StellaratorSource::sample(uint64_t* seed) const
   site.delayed_group = 0;
 
   // 1. Select a radial bin by its integrated mass, then sample within that bin.
-  double u = prn(seed);
-  int bin = std::upper_bound(radial_cdf_.begin(), radial_cdf_.end(), u) -
-            radial_cdf_.begin() - 1;
-  double t = (u - radial_cdf_[bin]) / (radial_cdf_[bin + 1] - radial_cdf_[bin]);
+  int bin = radial_bins_.sample(seed);
+  double t = prn(seed);
   const auto& c = radial_pdf_[bin];
-  double bound = cubic_rejection_bound(c);
   int64_t n_reject = 0;
   while (true) {
     double pdf = c[0] + t * (c[1] + t * (c[2] + t * c[3]));
-    if (prn(seed) * bound < pdf)
+    if (prn(seed) < pdf)
       break;
     if (++n_reject > MAX_SOURCE_REJECTIONS_PER_SAMPLE) {
       fatal_error("StellaratorSource: exceeded the maximum number of "
