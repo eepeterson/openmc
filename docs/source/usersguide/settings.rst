@@ -341,25 +341,24 @@ are born at :math:`t=0`. The toroidal extent can be restricted with
 Stellarator Plasma Sources
 --------------------------
 
-For fully three-dimensional plasmas, the :class:`openmc.StellaratorSource`
-class samples neutron positions from the flux-surface Fourier representation
-shared by the `VMEC <https://doi.org/10.1063/1.864116>`_ and `DESC
+For fully three-dimensional plasmas, the :class:`openmc.StellaratorSource` class
+samples neutron positions from the flux-surface Fourier representation shared by
+the `VMEC <https://doi.org/10.1063/1.864116>`_ and `DESC
 <https://doi.org/10.1088/1741-4326/ac6b06>`_ equilibrium codes. The plasma is
-described in flux coordinates :math:`(\rho, \theta, \zeta)`, where
-:math:`\rho = \sqrt{s}` is the square root of the normalized toroidal flux
-(proportional to the average minor radius), :math:`\theta` is the poloidal
-angle, and :math:`\zeta` is the toroidal angle (identical to the cylindrical
-azimuthal angle in both codes). The user provides the Fourier coefficients of
+described in flux coordinates :math:`(\rho, \theta, \zeta)`, where :math:`\rho =
+\sqrt{s}` is the square root of the normalized toroidal flux (proportional to
+the average minor radius), :math:`\theta` is the poloidal angle, and
+:math:`\zeta` is the toroidal angle (identical to the cylindrical azimuthal
+angle in both codes). The user provides the Fourier coefficients of
 :math:`R(\rho,\theta,\zeta)` and :math:`Z(\rho,\theta,\zeta)` on a radial grid
 together with an emission density :math:`S(\rho)` that is constant on flux
 surfaces. Fourier coefficients and emission are interpolated linearly in
-:math:`\rho`. The cubic marginal density :math:`S(\rho)\, V'(\rho)` is integrated
-analytically to select an interval, then sampled within that interval by
-rejection against a bound derived from its Bernstein coefficients. Rejected
+:math:`\rho`. The cubic marginal density :math:`S(\rho)\, V'(\rho)` is
+integrated analytically to select an interval, then sampled within that interval
+by rejection against a bound derived from its Bernstein coefficients. Rejected
 radial proposals are resampled within the same interval. The two angles are
-sampled from the conditional distribution
-:math:`p(\theta,\zeta|\rho) \propto R\,|\tau|` (with :math:`\tau` the
-poloidal-plane Jacobian) by rejection.
+sampled from the conditional distribution :math:`p(\theta,\zeta|\rho) \propto
+R\,|\tau|` (with :math:`\tau` the poloidal-plane Jacobian) by rejection.
 
 Sources are most conveniently created directly from equilibrium code output::
 
