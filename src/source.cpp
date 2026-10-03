@@ -6,7 +6,6 @@
 
 #include <algorithm> // for max
 #include <cmath>     // for sin, cos, abs
-#include <limits>    // for numeric_limits
 #include <utility>   // for move
 
 #ifdef HAS_DYNAMIC_LINKING
@@ -1205,11 +1204,8 @@ double cubic_rejection_bound(const array<double, 4>& c)
 {
   double bound = std::max({c[0], c[0] + c[1] / 3,
     c[0] + 2 * c[1] / 3 + c[2] / 3, c[0] + c[1] + c[2] + c[3]});
-  // Allow for rounding in both the bound and the polynomial evaluation.
-  double magnitude = 0;
-  for (double value : c)
-    magnitude += std::abs(value);
-  return bound + 64 * std::numeric_limits<double>::epsilon() * magnitude;
+  // Add a small relative margin for rounding in the bound and PDF evaluation.
+  return bound * (1.0 + 1.e-12);
 }
 
 } // namespace
