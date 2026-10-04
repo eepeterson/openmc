@@ -1278,6 +1278,11 @@ StellaratorSource::StellaratorSource(pugi::xml_node node) : Source(node)
         "StellaratorSource: emission_density values cannot be negative.");
     }
   }
+  if (std::none_of(emission_density_.begin(), emission_density_.end(),
+        [](double s) { return s > 0.0; })) {
+    fatal_error("StellaratorSource: emission_density must contain at least "
+                "one positive value.");
+  }
   if (n_modes == 0) {
     fatal_error("StellaratorSource: At least one Fourier mode is required.");
   }
@@ -1483,11 +1488,8 @@ void StellaratorSource::precompute_sampling_distributions()
   }
 
   // Integrate S(rho)*V'(rho) independently on each radial interval.
-  double s_scale =
+  double s_max =
     *std::max_element(emission_density_.begin(), emission_density_.end());
-  if (!(s_scale > 0))
-    fatal_error(
-      "StellaratorSource: integrated emission density must be positive.");
   vector<double> masses(n_bins);
   radial_pdf_.resize(n_bins);
   for (size_t b = 0; b < n_bins; ++b) {
@@ -1504,8 +1506,8 @@ void StellaratorSource::precompute_sampling_distributions()
     }
     if (!std::isfinite(v0 + vh + v1) || minimum < 0)
       fatal_error("StellaratorSource: invalid differential volume polynomial.");
-    double s0 = emission_density_[b] / s_scale;
-    double s1 = emission_density_[b + 1] / s_scale;
+    double s0 = emission_density_[b] / s_max;
+    double s1 = emission_density_[b + 1] / s_max;
     double ds = s1 - s0;
     // Simpson's rule exactly integrates the cubic S(rho)*V'(rho).
     masses[b] = h * ((s0 / 6) * v0 + ((s0 + s1) / 3) * vh + (s1 / 6) * v1);
@@ -1520,9 +1522,6 @@ void StellaratorSource::precompute_sampling_distributions()
     }
   }
   double total = std::accumulate(masses.begin(), masses.end(), 0.0);
-  if (!(total > 0) || !std::isfinite(total))
-    fatal_error(
-      "StellaratorSource: integrated emission must be finite and positive.");
   radial_bins_.assign({masses.data(), masses.size()});
 }
 
