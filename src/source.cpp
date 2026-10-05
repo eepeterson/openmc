@@ -6,6 +6,7 @@
 
 #include <algorithm> // for max
 #include <cmath>     // for sin, cos, abs
+#include <numeric>   // for accumulate
 #include <utility>   // for move
 
 #ifdef HAS_DYNAMIC_LINKING
@@ -1192,6 +1193,16 @@ double quad_max01(double f0, double fh, double f1)
   return m;
 }
 
+// Bernstein basis functions are nonnegative and sum to one on [0,1], so the
+// largest Bernstein coefficient bounds the cubic for rejection sampling.
+double cubic_rejection_bound(const array<double, 4>& c)
+{
+  double bound = std::max({c[0], c[0] + c[1] / 3,
+    c[0] + 2 * c[1] / 3 + c[2] / 3, c[0] + c[1] + c[2] + c[3]});
+  // Add a small relative margin for rounding in the bound and PDF evaluation.
+  return bound * (1.0 + 1.e-12);
+}
+
 } // namespace
 
 StellaratorSource::StellaratorSource(pugi::xml_node node) : Source(node)
@@ -1266,6 +1277,11 @@ StellaratorSource::StellaratorSource(pugi::xml_node node) : Source(node)
       fatal_error(
         "StellaratorSource: emission_density values cannot be negative.");
     }
+  }
+  if (std::none_of(emission_density_.begin(), emission_density_.end(),
+        [](double s) { return s > 0.0; })) {
+    fatal_error("StellaratorSource: emission_density must contain at least "
+                "one positive value.");
   }
   if (n_modes == 0) {
     fatal_error("StellaratorSource: At least one Fourier mode is required.");
@@ -1471,40 +1487,42 @@ void StellaratorSource::precompute_sampling_distributions()
       "coefficient tables are inconsistent.");
   }
 
-  // Build the marginal radial PDF p(rho) ~ S(rho) * V'(rho) on a refined grid
-  // containing all surfaces and bin midpoints. At interior surfaces the
-  // one-sided values from the two adjacent bins are averaged (the piecewise-
-  // linear coefficient interpolation makes V' one-sided there).
-  vector<double> grid(2 * n_rho - 1), pdf(2 * n_rho - 1);
-  for (size_t i = 0; i < n_rho; ++i) {
-    grid[2 * i] = rho_[i];
-    double vp;
-    if (i == 0) {
-      vp = vp_lo[0];
-    } else if (i == n_rho - 1) {
-      vp = vp_hi[n_bins - 1];
-    } else {
-      vp = 0.5 * (vp_hi[i - 1] + vp_lo[i]);
-    }
-    pdf[2 * i] = emission_density_[i] * std::max(0.0, vp);
-  }
+  // Integrate S(rho)*V'(rho) independently on each radial interval.
+  double s_max =
+    *std::max_element(emission_density_.begin(), emission_density_.end());
+  vector<double> masses(n_bins);
+  radial_pdf_.resize(n_bins);
   for (size_t b = 0; b < n_bins; ++b) {
-    grid[2 * b + 1] = 0.5 * (rho_[b] + rho_[b + 1]);
-    double s_mid = 0.5 * (emission_density_[b] + emission_density_[b + 1]);
-    pdf[2 * b + 1] = s_mid * std::max(0.0, vp_mid[b]);
+    double h = rho_[b + 1] - rho_[b];
+    double v0 = vp_lo[b];
+    double vh = vp_mid[b];
+    double v1 = vp_hi[b];
+    array<double, 3> a {v0, 4 * vh - 3 * v0 - v1, 2 * (v0 + v1 - 2 * vh)};
+    double minimum = std::min(v0, v1);
+    if (a[2] > 0) {
+      double t = -a[1] / (2 * a[2]);
+      if (t > 0 && t < 1)
+        minimum = std::min(minimum, a[0] + t * (a[1] + t * a[2]));
+    }
+    if (!std::isfinite(v0 + vh + v1) || minimum < 0)
+      fatal_error("StellaratorSource: invalid differential volume polynomial.");
+    double s0 = emission_density_[b] / s_max;
+    double s1 = emission_density_[b + 1] / s_max;
+    double ds = s1 - s0;
+    // Simpson's rule exactly integrates the cubic S(rho)*V'(rho).
+    masses[b] = h * ((s0 / 6) * v0 + ((s0 + s1) / 3) * vh + (s1 / 6) * v1);
+    auto& c = radial_pdf_[b];
+    c = {s0 * a[0], s0 * a[1] + ds * a[0], s0 * a[2] + ds * a[1], ds * a[2]};
+    double bound = cubic_rejection_bound(c);
+    if (bound > 0) {
+      if (!std::isfinite(bound) || !std::isfinite(masses[b]) || masses[b] <= 0)
+        fatal_error("StellaratorSource: invalid radial interval mass.");
+      for (double& v : c)
+        v /= bound;
+    }
   }
-
-  double total = 0.0;
-  for (size_t i = 1; i < grid.size(); ++i) {
-    total += 0.5 * (pdf[i - 1] + pdf[i]) * (grid[i] - grid[i - 1]);
-  }
-  if (total <= 0.0) {
-    fatal_error(
-      "StellaratorSource: Integrated emission density is zero or negative. "
-      "Check emission_density profile.");
-  }
-  radial_dist_ = make_unique<Tabular>(
-    grid.data(), pdf.data(), grid.size(), Interpolation::lin_lin);
+  double total = std::accumulate(masses.begin(), masses.end(), 0.0);
+  radial_bins_.assign({masses.data(), masses.size()});
 }
 
 double StellaratorSource::eval_density(int bin, double t, double theta,
@@ -1584,17 +1602,28 @@ SourceSite StellaratorSource::sample(uint64_t* seed) const
   site.wgt = 1.0;
   site.delayed_group = 0;
 
-  // 1. Sample rho from the marginal radial CDF
-  double rho = radial_dist_->sample(seed).first;
-  int n_bins = static_cast<int>(rho_.size()) - 1;
-  int bin = static_cast<int>(lower_bound_index(rho_.begin(), rho_.end(), rho));
-  bin = std::min(std::max(bin, 0), n_bins - 1);
-  double t = (rho - rho_[bin]) / (rho_[bin + 1] - rho_[bin]);
+  // 1. Select a radial bin by its integrated mass, then sample within that bin.
+  int bin = radial_bins_.sample(seed);
+  double t = prn(seed);
+  const auto& c = radial_pdf_[bin];
+  int64_t n_reject = 0;
+  while (true) {
+    double pdf = c[0] + t * (c[1] + t * (c[2] + t * c[3]));
+    if (prn(seed) < pdf)
+      break;
+    if (++n_reject > MAX_SOURCE_REJECTIONS_PER_SAMPLE) {
+      fatal_error("StellaratorSource: exceeded the maximum number of "
+                  "rejections while sampling within a radial interval.");
+    }
+    // Retain the selected bin so rejection does not change its probability.
+    t = prn(seed);
+  }
+  double rho = rho_[bin] + t * (rho_[bin + 1] - rho_[bin]);
 
   // 2. Rejection-sample (theta, zeta) from p(theta, zeta | rho) ~ R*tau
   double env = envelope_[bin];
   double R, Z, zeta;
-  int64_t n_reject = 0;
+  n_reject = 0;
   while (true) {
     double theta = 2.0 * PI * prn(seed);
     zeta = 2.0 * PI * prn(seed);

@@ -428,9 +428,8 @@ private:
 //! The sampling algorithm:
 //! 1. Sample rho from the marginal p(rho) ~ S(rho) * V'(rho), where
 //!    V'(rho) = int R |tau| dtheta dzeta is the differential volume, evaluated
-//!    exactly at setup via discrete Fourier orthogonality (trapezoidal
-//!    quadrature of a band-limited trigonometric polynomial) and inverted with
-//!    a tabulated CDF.
+//!    by Fourier quadrature. Each radial bin is selected using its analytically
+//!    integrated cubic PDF, then rho is sampled within the bin by rejection.
 //! 2. Sample (theta, zeta) from the conditional p(theta, zeta | rho)
 //!    ~ R |tau| by rejection against a precomputed per-radial-bin majorant.
 //! 3. Sample energy and time from user-provided distribution(s).
@@ -505,8 +504,9 @@ private:
   // Angular distribution (isotropic)
   UPtrAngle angle_;
 
-  // Precomputed distribution for radial sampling
-  unique_ptr<Tabular> radial_dist_;
+  // Bound-normalized cubic radial PDFs and the distribution of bin masses.
+  vector<array<double, 4>> radial_pdf_;
+  DiscreteIndex radial_bins_;
 
   // Per-radial-bin majorant of R*tau for rejection sampling (n_rho - 1)
   vector<double> envelope_;
